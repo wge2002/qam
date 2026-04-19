@@ -356,9 +356,14 @@ def main(_):
                 replay_batch = replay_buffer.sample_sequence(FLAGS.utd_ratio * config['batch_size'] // 2, 
                     sequence_length=FLAGS.horizon_length, discount=discount)
                 
-                batch = {k: np.concatenate([
-                    dataset_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + dataset_batch[k].shape[1:]), 
-                    replay_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + replay_batch[k].shape[1:])], axis=1) for k in dataset_batch}
+                batch = {
+                    k: np.concatenate([
+                        dataset_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + dataset_batch[k].shape[1:]),
+                        replay_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + replay_batch[k].shape[1:]),
+                    ], axis=1)
+                    for k in dataset_batch
+                    if k in replay_batch
+                }
                 
             else:
                 batch = replay_buffer.sample_sequence(config['batch_size'] * FLAGS.utd_ratio, 

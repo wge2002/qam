@@ -440,7 +440,7 @@ def get_config():
             n_conservative_actor_samples=0,
             conservative_q_agg="pessimistic",
             support_q_agg="pessimistic",
-            behavior_support_k=16,
+            behavior_support_k=0,
             behavior_support_temperature=1.0,
             behavior_support_include_self=True,
             behavior_support_normalize_observations=True,
