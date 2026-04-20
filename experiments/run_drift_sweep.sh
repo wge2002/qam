@@ -4,7 +4,7 @@ set -euo pipefail
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
 RUN_GROUP="${RUN_GROUP:-drift-sweep-$(date +%m%d-%H%M)}"
-ENV_NAME="${ENV_NAME:-cube-triple-play-singletask-task2-v0}"
+ENV_NAME="${ENV_NAME:-cube-double-play-singletask-task2-v0}"
 SEED="${SEED:-10001}"
 
 COMMON_ARGS=(
@@ -20,7 +20,7 @@ COMMON_ARGS=(
   --agent.batch_size=256
   --agent.num_qs=10
   --offline_steps=1000000
-  --online_steps=500000
+  --online_steps=0
   --log_interval=5000
   --eval_interval=50000
   --save_interval=50000
@@ -39,16 +39,16 @@ run_one() {
   echo "Extra args: $*"
   echo "============================================================"
 
-  python main.py \
+  WANDB_ENTITY=xxxyyymmm python main.py \
     --run_group="${RUN_GROUP}" \
     --tags="${tag}" \
     "${COMMON_ARGS[@]}" \
     "$@"
 }
 
-run_one DRIFT_BASE \
+run_one DRIFT_BETA_HIGH \
   --agent.drift_tau=0.75 \
-  --agent.drift_beta=1.0 \
+  --agent.drift_beta=2 \
   --agent.drift_lambda_pi=1.0 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.05
