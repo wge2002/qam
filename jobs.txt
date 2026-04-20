@@ -1,0 +1,17 @@
+# beta/lambda_pi ablation, fixed tau=0.75, best_of_n=8
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B0_L0_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.0 --agent.drift_lambda_pi=0.0 --agent.drift_tau=0.75
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B02_L0_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.2 --agent.drift_lambda_pi=0.0 --agent.drift_tau=0.75
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B0_L02_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.0 --agent.drift_lambda_pi=0.2 --agent.drift_tau=0.75
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B01_L01_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.1 --agent.drift_lambda_pi=0.1 --agent.drift_tau=0.75
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B02_L02_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.2 --agent.drift_lambda_pi=0.2 --agent.drift_tau=0.75
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B05_L02_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.5 --agent.drift_lambda_pi=0.2 --agent.drift_tau=0.75
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B02_L05_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.2 --agent.drift_lambda_pi=0.5 --agent.drift_tau=0.75
+
+--run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B05_L05_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.5 --agent.drift_lambda_pi=0.5 --agent.drift_tau=0.75
