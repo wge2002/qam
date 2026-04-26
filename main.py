@@ -71,7 +71,7 @@ class LoggingHelper:
 
 def main(_):
     exp_name = get_exp_name(FLAGS)
-    run = setup_wandb(project='qam-reproduce', group=FLAGS.run_group, name=exp_name, tags=FLAGS.tags.split(","))
+    run = setup_wandb(project='wge_drift', group=FLAGS.run_group, name=exp_name, tags=FLAGS.tags.split(","))
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     
     # data loading

@@ -3,9 +3,10 @@ set -euo pipefail
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
-RUN_GROUP="${RUN_GROUP:-drift-sweep-$(date +%m%d-%H%M)}"
+RUN_GROUP="${RUN_GROUP:-drift-param8-$(date +%m%d-%H%M)}"
 ENV_NAME="${ENV_NAME:-cube-double-play-singletask-task2-v0}"
 SEED="${SEED:-10001}"
+WANDB_ENTITY="${WANDB_ENTITY:-xxxyyymmm}"
 
 COMMON_ARGS=(
   --agent=agents/drift.py
@@ -39,37 +40,69 @@ run_one() {
   echo "Extra args: $*"
   echo "============================================================"
 
-  WANDB_ENTITY=xxxyyymmm python main.py \
+  WANDB_ENTITY="${WANDB_ENTITY}" python main.py \
     --run_group="${RUN_GROUP}" \
     --tags="${tag}" \
     "${COMMON_ARGS[@]}" \
     "$@"
 }
 
-run_one DRIFT_BETA_HIGH \
-  --agent.drift_tau=0.75 \
-  --agent.drift_beta=2 \
-  --agent.drift_lambda_pi=1.0 \
-  --agent.kernel_bandwidth=0.25 \
-  --agent.transport_step_size=0.05
+# No baseline in this script. Baseline was:
+# tau=0.75 beta=1.0 lambda_pi=1.0 bandwidth=0.25 step=0.05.
+# Keep behavior_support_k=0 for this round to avoid kNN support bias.
 
-run_one DRIFT_TAU_LOW \
+run_one DRIFT_TAU050_BETA100 \
   --agent.drift_tau=0.50 \
   --agent.drift_beta=1.0 \
   --agent.drift_lambda_pi=1.0 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.05
 
-run_one DRIFT_BW_LOW \
-  --agent.drift_tau=0.75 \
+run_one DRIFT_TAU035_BETA100 \
+  --agent.drift_tau=0.35 \
   --agent.drift_beta=1.0 \
+  --agent.drift_lambda_pi=1.0 \
+  --agent.kernel_bandwidth=0.25 \
+  --agent.transport_step_size=0.05
+
+run_one DRIFT_TAU075_BETA050 \
+  --agent.drift_tau=0.75 \
+  --agent.drift_beta=0.5 \
+  --agent.drift_lambda_pi=1.0 \
+  --agent.kernel_bandwidth=0.25 \
+  --agent.transport_step_size=0.05
+
+run_one DRIFT_TAU050_BETA050 \
+  --agent.drift_tau=0.50 \
+  --agent.drift_beta=0.5 \
+  --agent.drift_lambda_pi=1.0 \
+  --agent.kernel_bandwidth=0.25 \
+  --agent.transport_step_size=0.05
+
+run_one DRIFT_TAU050_BETA050_BW010 \
+  --agent.drift_tau=0.50 \
+  --agent.drift_beta=0.5 \
   --agent.drift_lambda_pi=1.0 \
   --agent.kernel_bandwidth=0.10 \
   --agent.transport_step_size=0.05
 
-run_one DRIFT_STEP_HIGH \
-  --agent.drift_tau=0.75 \
-  --agent.drift_beta=1.0 \
+run_one DRIFT_TAU050_BETA050_BW050 \
+  --agent.drift_tau=0.50 \
+  --agent.drift_beta=0.5 \
+  --agent.drift_lambda_pi=1.0 \
+  --agent.kernel_bandwidth=0.50 \
+  --agent.transport_step_size=0.05
+
+run_one DRIFT_TAU050_BETA050_STEP025 \
+  --agent.drift_tau=0.50 \
+  --agent.drift_beta=0.5 \
+  --agent.drift_lambda_pi=1.0 \
+  --agent.kernel_bandwidth=0.25 \
+  --agent.transport_step_size=0.025
+
+run_one DRIFT_TAU050_BETA050_STEP100 \
+  --agent.drift_tau=0.50 \
+  --agent.drift_beta=0.5 \
   --agent.drift_lambda_pi=1.0 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.10
