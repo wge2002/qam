@@ -3,7 +3,7 @@ set -euo pipefail
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
-RUN_GROUP="${RUN_GROUP:-drift-param8-$(date +%m%d-%H%M)}"
+RUN_GROUP="${RUN_GROUP:-drift-diagnostics-r5-$(date +%m%d-%H%M)}"
 ENV_NAME="${ENV_NAME:-cube-double-play-singletask-task2-v0}"
 SEED="${SEED:-10001}"
 WANDB_ENTITY="${WANDB_ENTITY:-xxxyyymmm}"
@@ -11,7 +11,6 @@ WANDB_ENTITY="${WANDB_ENTITY:-xxxyyymmm}"
 COMMON_ARGS=(
   --agent=agents/drift.py
   --seed="${SEED}"
-  --env_name="${ENV_NAME}"
   --sparse=False
   --horizon_length=5
   --agent.action_chunking=True
@@ -30,79 +29,61 @@ COMMON_ARGS=(
 
 run_one() {
   local tag="$1"
-  shift
+  local env_name="$2"
+  shift 2
+
+  local full_tag="${tag}"
+  if [[ "${env_name}" == *"task1"* ]]; then
+    full_tag="${tag}_TASK1"
+  elif [[ "${env_name}" == *"task2"* ]]; then
+    full_tag="${tag}_TASK2"
+  fi
 
   echo "============================================================"
-  echo "Starting ${tag}"
+  echo "Starting ${full_tag}"
   echo "Run group: ${RUN_GROUP}"
-  echo "Env: ${ENV_NAME}"
+  echo "Env: ${env_name}"
   echo "Seed: ${SEED}"
   echo "Extra args: $*"
   echo "============================================================"
 
   WANDB_ENTITY="${WANDB_ENTITY}" python main.py \
     --run_group="${RUN_GROUP}" \
-    --tags="${tag}" \
+    --tags="${full_tag}" \
+    --env_name="${env_name}" \
     "${COMMON_ARGS[@]}" \
     "$@"
 }
 
-# No baseline in this script. Baseline was:
-# tau=0.75 beta=1.0 lambda_pi=1.0 bandwidth=0.25 step=0.05.
-# Keep behavior_support_k=0 for this round to avoid kNN support bias.
+# Round 5: diagnostic reruns with extra vector-direction logging.
+# These are not a broad sweep. They compare:
+# 1) task1 successful NOPESS regime,
+# 2) task2 with the same NOPESS regime,
+# 3) task2 current best region.
 
-run_one DRIFT_TAU050_BETA100 \
-  --agent.drift_tau=0.50 \
-  --agent.drift_beta=1.0 \
-  --agent.drift_lambda_pi=1.0 \
-  --agent.kernel_bandwidth=0.25 \
-  --agent.transport_step_size=0.05
-
-run_one DRIFT_TAU035_BETA100 \
-  --agent.drift_tau=0.35 \
-  --agent.drift_beta=1.0 \
-  --agent.drift_lambda_pi=1.0 \
-  --agent.kernel_bandwidth=0.25 \
-  --agent.transport_step_size=0.05
-
-run_one DRIFT_TAU075_BETA050 \
+run_one DRIFT_R5_NOPESS_B02_L02_T075 \
+  cube-double-play-singletask-task1-v0 \
   --agent.drift_tau=0.75 \
-  --agent.drift_beta=0.5 \
-  --agent.drift_lambda_pi=1.0 \
+  --agent.drift_beta=0.2 \
+  --agent.drift_lambda_pi=0.2 \
+  --agent.actor_pessimism_coef=0.0 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.05
 
-run_one DRIFT_TAU050_BETA050 \
-  --agent.drift_tau=0.50 \
-  --agent.drift_beta=0.5 \
-  --agent.drift_lambda_pi=1.0 \
+run_one DRIFT_R5_NOPESS_B02_L02_T075 \
+  cube-double-play-singletask-task2-v0 \
+  --agent.drift_tau=0.75 \
+  --agent.drift_beta=0.2 \
+  --agent.drift_lambda_pi=0.2 \
+  --agent.actor_pessimism_coef=0.0 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.05
 
-run_one DRIFT_TAU050_BETA050_BW010 \
+run_one DRIFT_R5_CTRL_PESS05_B10_L10_STEP025 \
+  cube-double-play-singletask-task2-v0 \
   --agent.drift_tau=0.50 \
-  --agent.drift_beta=0.5 \
+  --agent.drift_beta=1.0 \
   --agent.drift_lambda_pi=1.0 \
-  --agent.kernel_bandwidth=0.10 \
-  --agent.transport_step_size=0.05
-
-run_one DRIFT_TAU050_BETA050_BW050 \
-  --agent.drift_tau=0.50 \
-  --agent.drift_beta=0.5 \
-  --agent.drift_lambda_pi=1.0 \
-  --agent.kernel_bandwidth=0.50 \
-  --agent.transport_step_size=0.05
-
-run_one DRIFT_TAU050_BETA050_STEP025 \
-  --agent.drift_tau=0.50 \
-  --agent.drift_beta=0.5 \
-  --agent.drift_lambda_pi=1.0 \
+  --agent.actor_pessimism_coef=0.5 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.025
-
-run_one DRIFT_TAU050_BETA050_STEP100 \
-  --agent.drift_tau=0.50 \
-  --agent.drift_beta=0.5 \
-  --agent.drift_lambda_pi=1.0 \
-  --agent.kernel_bandwidth=0.25 \
-  --agent.transport_step_size=0.10

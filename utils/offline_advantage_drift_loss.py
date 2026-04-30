@@ -338,12 +338,32 @@ def offline_transport_drift_loss(
         policy_bandwidth,
         exclude_self=bool(exclude_self_kde),
     )
-    velocity = q_score + beta * behavior_score - lambda_pi * policy_score
+    q_term = q_score
+    behavior_term = beta * behavior_score
+    policy_term = -lambda_pi * policy_score
+    velocity = q_term + behavior_term + policy_term
     gen_target = old_gen + transport_step_size * velocity
 
     target_step = gen_target - old_gen
     diff = gen - jax.lax.stop_gradient(gen_target)
     loss = jnp.mean(jnp.square(diff), axis=(-1, -2))
+
+    def rms(x):
+        return jnp.sqrt(jnp.clip(jnp.mean(jnp.square(x)), min=1e-12))
+
+    def field_cosine(x, y, eps=1e-8):
+        dot = jnp.sum(x * y, axis=-1)
+        x_norm = jnp.linalg.norm(x, axis=-1)
+        y_norm = jnp.linalg.norm(y, axis=-1)
+        return jnp.mean(dot / jnp.clip(x_norm * y_norm, min=eps))
+
+    q_term_rms = rms(q_term)
+    behavior_term_rms = rms(behavior_term)
+    policy_term_rms = rms(policy_term)
+    velocity_rms = rms(velocity)
+    target_step_rms = rms(target_step)
+    component_rms_sum = q_term_rms + behavior_term_rms + policy_term_rms
+
     info = {
         "transport_loss_type": jnp.asarray(1.0, dtype=gen.dtype),
         "tau": jnp.asarray(tau, dtype=gen.dtype),
@@ -368,8 +388,23 @@ def offline_transport_drift_loss(
         "policy_score_rms": jnp.sqrt(
             jnp.clip(jnp.mean(jnp.square(policy_score)), min=1e-12)
         ),
-        "velocity_rms": jnp.sqrt(jnp.clip(jnp.mean(jnp.square(velocity)), min=1e-12)),
-        "target_step_rms": jnp.sqrt(jnp.clip(jnp.mean(jnp.square(target_step)), min=1e-12)),
+        "q_term_rms": q_term_rms,
+        "behavior_term_rms": behavior_term_rms,
+        "policy_term_rms": policy_term_rms,
+        "velocity_rms": velocity_rms,
+        "target_step_rms": target_step_rms,
+        "component_rms_sum": component_rms_sum,
+        "velocity_over_component_rms_sum": velocity_rms / jnp.clip(component_rms_sum, min=1e-8),
+        "cos_q_behavior": field_cosine(q_term, behavior_term),
+        "cos_q_policy": field_cosine(q_term, policy_term),
+        "cos_behavior_policy": field_cosine(behavior_term, policy_term),
+        "cos_q_velocity": field_cosine(q_term, velocity),
+        "cos_behavior_velocity": field_cosine(behavior_term, velocity),
+        "cos_policy_velocity": field_cosine(policy_term, velocity),
+        "gen_abs_mean": jnp.mean(jnp.abs(old_gen)),
+        "gen_saturation_frac": jnp.mean((jnp.abs(old_gen) > 0.95).astype(gen.dtype)),
+        "target_abs_mean": jnp.mean(jnp.abs(gen_target)),
+        "target_saturation_frac": jnp.mean((jnp.abs(gen_target) > 0.95).astype(gen.dtype)),
         "n_offline": jnp.asarray(float(offline_actions.shape[1]), dtype=gen.dtype),
         "offline_action_count": jnp.asarray(float(offline_actions.shape[1]), dtype=gen.dtype),
     }
