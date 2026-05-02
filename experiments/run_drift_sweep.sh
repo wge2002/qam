@@ -3,7 +3,7 @@ set -euo pipefail
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
-RUN_GROUP="${RUN_GROUP:-drift-diagnostics-r5-$(date +%m%d-%H%M)}"
+RUN_GROUP="${RUN_GROUP:-drift-q0-bc-r6-$(date +%m%d-%H%M)}"
 ENV_NAME="${ENV_NAME:-cube-double-play-singletask-task2-v0}"
 SEED="${SEED:-10001}"
 WANDB_ENTITY="${WANDB_ENTITY:-xxxyyymmm}"
@@ -55,23 +55,34 @@ run_one() {
     "$@"
 }
 
-# Round 5: diagnostic reruns with extra vector-direction logging.
-# These are not a broad sweep. They compare:
-# 1) task1 successful NOPESS regime,
-# 2) task2 with the same NOPESS regime,
-# 3) task2 current best region.
+# Round 6: test whether the Q-gradient term is hurting.
+# Q0 keeps the transport behavior/policy KDE terms but removes q_score from velocity.
+# BC uses a pure actor behavior cloning loss and disables critic gradients.
 
-run_one DRIFT_R5_NOPESS_B02_L02_T075 \
+run_one DRIFT_R6_Q0_TRANSPORT_B02_L02_T075 \
   cube-double-play-singletask-task1-v0 \
   --agent.drift_tau=0.75 \
   --agent.drift_beta=0.2 \
   --agent.drift_lambda_pi=0.2 \
   --agent.actor_pessimism_coef=0.0 \
+  --agent.q_term_scale=0.0 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.05
 
-run_one DRIFT_R5_NOPESS_B02_L02_T075 \
+run_one DRIFT_R6_Q0_TRANSPORT_B02_L02_T075 \
   cube-double-play-singletask-task2-v0 \
+  --agent.drift_tau=0.75 \
+  --agent.drift_beta=0.2 \
+  --agent.drift_lambda_pi=0.2 \
+  --agent.actor_pessimism_coef=0.0 \
+  --agent.q_term_scale=0.0 \
+  --agent.kernel_bandwidth=0.25 \
+  --agent.transport_step_size=0.05
+
+run_one DRIFT_R6_PURE_BC \
+  cube-double-play-singletask-task1-v0 \
+  --agent.actor_loss_type=bc \
+  --agent.critic_loss_weight=0.0 \
   --agent.drift_tau=0.75 \
   --agent.drift_beta=0.2 \
   --agent.drift_lambda_pi=0.2 \
@@ -79,11 +90,13 @@ run_one DRIFT_R5_NOPESS_B02_L02_T075 \
   --agent.kernel_bandwidth=0.25 \
   --agent.transport_step_size=0.05
 
-run_one DRIFT_R5_CTRL_PESS05_B10_L10_STEP025 \
+run_one DRIFT_R6_PURE_BC \
   cube-double-play-singletask-task2-v0 \
-  --agent.drift_tau=0.50 \
-  --agent.drift_beta=1.0 \
-  --agent.drift_lambda_pi=1.0 \
-  --agent.actor_pessimism_coef=0.5 \
+  --agent.actor_loss_type=bc \
+  --agent.critic_loss_weight=0.0 \
+  --agent.drift_tau=0.75 \
+  --agent.drift_beta=0.2 \
+  --agent.drift_lambda_pi=0.2 \
+  --agent.actor_pessimism_coef=0.0 \
   --agent.kernel_bandwidth=0.25 \
-  --agent.transport_step_size=0.025
+  --agent.transport_step_size=0.05

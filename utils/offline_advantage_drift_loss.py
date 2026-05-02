@@ -242,6 +242,7 @@ def offline_transport_drift_loss(
     bandwidth_scale=1.0,
     min_bandwidth=1e-3,
     max_bandwidth=None,
+    q_term_scale=1.0,
 ):
     """Score-difference offline transport loss.
 
@@ -286,6 +287,7 @@ def offline_transport_drift_loss(
     tau = max(float(tau), 1e-8)
     beta = float(beta)
     lambda_pi = float(lambda_pi)
+    q_term_scale = float(q_term_scale)
     kernel_bandwidth = float(kernel_bandwidth)
     transport_step_size = float(transport_step_size)
 
@@ -338,7 +340,7 @@ def offline_transport_drift_loss(
         policy_bandwidth,
         exclude_self=bool(exclude_self_kde),
     )
-    q_term = q_score
+    q_term = q_term_scale * q_score
     behavior_term = beta * behavior_score
     policy_term = -lambda_pi * policy_score
     velocity = q_term + behavior_term + policy_term
@@ -369,6 +371,7 @@ def offline_transport_drift_loss(
         "tau": jnp.asarray(tau, dtype=gen.dtype),
         "beta": jnp.asarray(beta, dtype=gen.dtype),
         "lambda_pi": jnp.asarray(lambda_pi, dtype=gen.dtype),
+        "q_term_scale": jnp.asarray(q_term_scale, dtype=gen.dtype),
         "kernel_bandwidth": jnp.asarray(kernel_bandwidth, dtype=gen.dtype),
         "transport_step_size": jnp.asarray(transport_step_size, dtype=gen.dtype),
         "normalize_q_grad": jnp.asarray(float(bool(normalize_q_grad)), dtype=gen.dtype),

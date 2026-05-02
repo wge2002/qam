@@ -235,25 +235,39 @@ class DriftAgent(flax.struct.PyTreeNode):
         )
         data_q = jnp.sum(support_q * normalize_support_weights(support_weights), axis=1)
 
-        loss, info = offline_transport_drift_loss(
-            gen=gen_actions,
-            offline_actions=support_actions,
-            offline_weights=support_weights,
-            adv_grad=q_grad,
-            tau=self.config["drift_tau"],
-            beta=self.config["drift_beta"],
-            lambda_pi=self.config["drift_lambda_pi"],
-            kernel_bandwidth=self.config["kernel_bandwidth"],
-            transport_step_size=self.config["transport_step_size"],
-            normalize_q_grad=self.config["normalize_q_grad"],
-            q_grad_clip_norm=self.config["q_grad_clip_norm"],
-            exclude_self_kde=self.config["exclude_self_kde"],
-            adaptive_bandwidth=self.config["adaptive_bandwidth"],
-            bandwidth_quantile=self.config["bandwidth_quantile"],
-            bandwidth_scale=self.config["bandwidth_scale"],
-            min_bandwidth=self.config["min_bandwidth"],
-            max_bandwidth=self.config["max_bandwidth"],
-        )
+        actor_loss_type = self.config["actor_loss_type"]
+        if actor_loss_type == "transport":
+            loss, info = offline_transport_drift_loss(
+                gen=gen_actions,
+                offline_actions=support_actions,
+                offline_weights=support_weights,
+                adv_grad=q_grad,
+                tau=self.config["drift_tau"],
+                beta=self.config["drift_beta"],
+                lambda_pi=self.config["drift_lambda_pi"],
+                kernel_bandwidth=self.config["kernel_bandwidth"],
+                transport_step_size=self.config["transport_step_size"],
+                normalize_q_grad=self.config["normalize_q_grad"],
+                q_grad_clip_norm=self.config["q_grad_clip_norm"],
+                exclude_self_kde=self.config["exclude_self_kde"],
+                adaptive_bandwidth=self.config["adaptive_bandwidth"],
+                bandwidth_quantile=self.config["bandwidth_quantile"],
+                bandwidth_scale=self.config["bandwidth_scale"],
+                min_bandwidth=self.config["min_bandwidth"],
+                max_bandwidth=self.config["max_bandwidth"],
+                q_term_scale=self.config["q_term_scale"],
+            )
+        elif actor_loss_type == "bc":
+            normalized_weights = normalize_support_weights(support_weights)
+            sqdist = jnp.mean(jnp.square(gen_actions[:, :, None, :] - support_actions[:, None, :, :]), axis=-1)
+            loss = jnp.sum(sqdist * normalized_weights[:, None, :], axis=-1).mean(axis=-1)
+            info = {
+                "transport_loss_type": jnp.asarray(0.0, dtype=gen_actions.dtype),
+                "bc_loss": loss.mean(),
+                "bc_support_mse": loss.mean(),
+            }
+        else:
+            raise ValueError(f"Unsupported actor_loss_type: {actor_loss_type}")
         actor_loss = loss.mean()
         support_mse = jnp.min(
             jnp.mean(jnp.square(gen_actions[:, 0, None, :] - support_actions), axis=-1),
@@ -285,7 +299,7 @@ class DriftAgent(flax.struct.PyTreeNode):
         for key, value in actor_info.items():
             info[f"actor/{key}"] = value
 
-        return critic_loss + actor_loss, info
+        return self.config["critic_loss_weight"] * critic_loss + actor_loss, info
 
     def target_update(self, network, module_name):
         new_target_params = jax.tree_util.tree_map(
@@ -415,6 +429,8 @@ def get_config():
             target_q_agg="pessimistic",
             actor_q_agg="pessimistic",
             target_action_agg="mean",
+            actor_loss_type="transport",
+            critic_loss_weight=1.0,
             pessimism_coef=0.5,
             actor_pessimism_coef=0.5,
             target_actor=True,
@@ -425,6 +441,7 @@ def get_config():
             drift_tau=0.75,
             drift_beta=1.0,
             drift_lambda_pi=1.0,
+            q_term_scale=1.0,
             kernel_bandwidth=0.25,
             transport_step_size=0.05,
             normalize_q_grad=False,
