@@ -56,7 +56,7 @@ def aggregate_sample_values(values, mode):
     raise ValueError(f"Unsupported sample value aggregation: {mode}")
 
 
-def normalize_support_weights(weights, eps=1e-8):
+def _normalize_weights(weights, eps=1e-8):
     weights = jnp.clip(weights, min=0.0)
     return weights / jnp.clip(jnp.sum(weights, axis=-1, keepdims=True), min=eps)
 
@@ -74,8 +74,10 @@ class DriftAgent(flax.struct.PyTreeNode):
         return batch["actions"][..., 0, :]
 
     def _support_actions(self, batch, batch_actions):
-        support_actions = batch.get("support_actions", batch_actions[:, None, :])
-        if support_actions.ndim == 4:
+        support_actions = batch.get("support_actions")
+        if support_actions is None:
+            support_actions = batch_actions[:, None, :]
+        elif support_actions.ndim == 4:
             support_actions = jnp.reshape(
                 support_actions,
                 (support_actions.shape[0], support_actions.shape[1], -1),
@@ -85,6 +87,65 @@ class DriftAgent(flax.struct.PyTreeNode):
             jnp.ones((batch_actions.shape[0], support_actions.shape[1]), dtype=batch_actions.dtype),
         )
         return support_actions, support_weights
+
+    def _weight_support_from_scores(self, support_weights, support_q, prefix="positive"):
+        mode = self.config.get(f"{prefix}_weighting", "uniform")
+        support_weights = jnp.clip(support_weights, min=0.0)
+        valid = support_weights > 0.0
+        support_count = support_q.shape[1]
+        clip_min = float(self.config.get(f"{prefix}_weight_clip_min", 1.0e-6))
+        clip_max = float(self.config.get(f"{prefix}_weight_clip_max", 1.0))
+        temp = max(float(self.config.get(f"{prefix}_temp", 1.0)), 1.0e-6)
+
+        if mode == "uniform":
+            raw_weights = support_weights
+        elif mode == "q_top1":
+            masked_scores = jnp.where(valid, support_q, -jnp.inf)
+            selected_idx = jnp.argmax(masked_scores, axis=1)
+            raw_weights = jax.nn.one_hot(selected_idx, support_count, dtype=support_q.dtype)
+        elif mode == "q_topk":
+            topk = int(self.config.get(f"{prefix}_topk", 0))
+            topk = support_count if topk <= 0 else min(max(1, topk), support_count)
+            masked_scores = jnp.where(valid, support_q, -jnp.inf)
+            _, top_indices = jax.lax.top_k(masked_scores, topk)
+            top_mask = jnp.sum(
+                jax.nn.one_hot(top_indices, support_count, dtype=support_q.dtype),
+                axis=1,
+            ) > 0.0
+            if bool(self.config.get(f"{prefix}_include_first_support", False)):
+                first_mask = jnp.zeros_like(top_mask).at[:, 0].set(True)
+                top_mask = jnp.logical_or(top_mask, jnp.logical_and(first_mask, valid))
+            logits = support_q / temp + jnp.log(jnp.clip(support_weights, min=clip_min))
+            logits = jnp.where(jnp.logical_and(valid, top_mask), logits, -jnp.inf)
+            raw_weights = jax.nn.softmax(logits, axis=1)
+        elif mode in ("q_softmax", "oracle_softmax"):
+            logits = support_q / temp + jnp.log(jnp.clip(support_weights, min=clip_min))
+            logits = jnp.where(valid, logits, -jnp.inf)
+            raw_weights = jax.nn.softmax(logits, axis=1)
+        else:
+            raise ValueError(f"Unsupported {prefix}_weighting: {mode}")
+
+        raw_weights = jnp.where(
+            raw_weights > 0.0,
+            jnp.clip(raw_weights, min=clip_min, max=clip_max),
+            0.0,
+        )
+        weights = _normalize_weights(raw_weights)
+        if bool(self.config.get(f"{prefix}_stop_grad_weights", True)):
+            weights = jax.lax.stop_gradient(weights)
+
+        prob = _normalize_weights(weights)
+        entropy = -jnp.sum(prob * jnp.log(jnp.clip(prob, min=1.0e-8)), axis=1)
+        selected_idx = jnp.argmax(prob, axis=1)
+        selected_q = jnp.take_along_axis(support_q, selected_idx[:, None], axis=1)[:, 0]
+        info = {
+            f"{prefix}_weight_entropy_mean": jnp.mean(entropy),
+            f"{prefix}_effective_num_supports": jnp.mean(jnp.exp(entropy)),
+            f"{prefix}_weight_max_mean": jnp.mean(jnp.max(prob, axis=1)),
+            f"{prefix}_selected_q_mean": jnp.mean(selected_q),
+            f"{prefix}_selected_q_std": jnp.std(selected_q),
+        }
+        return weights, info
 
     def _sample_particles_with_model(self, observations, rng, num_particles, model="actor"):
         noise_dim = self.config["noise_dim"]
@@ -96,6 +157,15 @@ class DriftAgent(flax.struct.PyTreeNode):
         actions = self.network.select(model)(obs_rep, noises)
         return jnp.clip(actions, -1.0, 1.0)
 
+    def _transport_step_size(self):
+        step_size = jnp.asarray(float(self.config["transport_step_size"]), dtype=jnp.float32)
+        after_size = float(self.config.get("transport_step_size_after", 0.0))
+        schedule_step = int(self.config.get("transport_step_size_schedule_step", 0))
+        if after_size <= 0.0 or schedule_step <= 0:
+            return step_size
+        after_size = jnp.asarray(after_size, dtype=jnp.float32)
+        return jnp.where(self.network.step >= schedule_step, after_size, step_size)
+
     def _score_action_set(self, observations, actions, q_agg, pessimism_coef=0.0, critic="critic"):
         batch_size, num_actions = actions.shape[:2]
         obs_rep = jnp.repeat(observations[:, None, :], num_actions, axis=1)
@@ -103,9 +173,8 @@ class DriftAgent(flax.struct.PyTreeNode):
         flat_actions = actions.reshape(batch_size * num_actions, actions.shape[-1])
         q_values = self.network.select(critic)(flat_obs, flat_actions)
         if q_values.ndim == 1:
-            q_values = q_values.reshape(batch_size, num_actions)
-        else:
-            q_values = q_values.reshape(q_values.shape[0], batch_size, num_actions)
+            return q_values.reshape(batch_size, num_actions)
+        q_values = q_values.reshape(q_values.shape[0], batch_size, num_actions)
         return aggregate_q_values(q_values, q_agg, pessimism_coef=pessimism_coef)
 
     def critic_loss(self, batch, grad_params, rng):
@@ -167,8 +236,10 @@ class DriftAgent(flax.struct.PyTreeNode):
                 self.config["support_q_agg"],
                 pessimism_coef=self.config["pessimism_coef"],
             )
-            normalized_weights = normalize_support_weights(support_weights)
-            support_ref_q = jnp.sum(support_q * normalized_weights, axis=1)
+            support_ref_q = jnp.sum(
+                support_q * _normalize_weights(support_weights),
+                axis=1,
+            )
             proposal_minus_data_q = proposal_q - support_ref_q[:, None]
             conservative_loss = jnp.maximum(
                 proposal_minus_data_q + self.config["conservative_margin"],
@@ -199,7 +270,7 @@ class DriftAgent(flax.struct.PyTreeNode):
         batch_size, action_dim = batch_actions.shape
         support_actions, support_weights = self._support_actions(batch, batch_actions)
 
-        rng, gen_rng = jax.random.split(rng)
+        rng, gen_rng, actor_candidate_rng = jax.random.split(rng, 3)
         gen_per_obs = int(self.config["gen_per_obs"])
         noises = jax.random.normal(gen_rng, (batch_size, gen_per_obs, self.config["noise_dim"]))
         obs_rep = jnp.repeat(batch["observations"][:, None, :], gen_per_obs, axis=1)
@@ -208,6 +279,27 @@ class DriftAgent(flax.struct.PyTreeNode):
 
         flat_obs = obs_rep.reshape(batch_size * gen_per_obs, batch["observations"].shape[-1])
         flat_actions = jax.lax.stop_gradient(gen_actions).reshape(batch_size * gen_per_obs, action_dim)
+
+        actor_update_mode = self.config.get("actor_update_mode", "decomposed")
+        num_actor_candidates = int(self.config.get("positive_num_actor_candidates", 0))
+        if actor_update_mode in ("positive_drift", "positive_drift_plus_residual") and num_actor_candidates > 0:
+            actor_candidate_noises = jax.random.normal(
+                actor_candidate_rng,
+                (batch_size, num_actor_candidates, self.config["noise_dim"]),
+            )
+            actor_candidate_obs = jnp.repeat(batch["observations"][:, None, :], num_actor_candidates, axis=1)
+            actor_candidate_actions = self.network.select("actor")(
+                actor_candidate_obs,
+                actor_candidate_noises,
+                params=grad_params,
+            )
+            actor_candidate_actions = jax.lax.stop_gradient(jnp.clip(actor_candidate_actions, -1.0, 1.0))
+            support_actions = jnp.concatenate([support_actions, actor_candidate_actions], axis=1)
+            actor_candidate_weights = jnp.ones(
+                (batch_size, num_actor_candidates),
+                dtype=support_weights.dtype,
+            )
+            support_weights = jnp.concatenate([support_weights, actor_candidate_weights], axis=1)
 
         def q_sum(actions):
             q_values = self.network.select("target_critic")(flat_obs, actions)
@@ -218,7 +310,11 @@ class DriftAgent(flax.struct.PyTreeNode):
             )
             return q.sum()
 
-        q_grad = jax.grad(q_sum)(flat_actions).reshape(batch_size, gen_per_obs, action_dim)
+        if actor_update_mode in ("positive_drift", "positive_drift_plus_residual"):
+            q_grad = jnp.zeros((batch_size, gen_per_obs, action_dim), dtype=gen_actions.dtype)
+        else:
+            q_grad = jax.grad(q_sum)(flat_actions).reshape(batch_size, gen_per_obs, action_dim)
+            q_grad = q_grad * float(self.config.get("q_grad_scale", 1.0))
         gen_q_values = self.network.select("target_critic")(flat_obs, flat_actions)
         gen_q = aggregate_q_values(
             gen_q_values,
@@ -226,25 +322,44 @@ class DriftAgent(flax.struct.PyTreeNode):
             pessimism_coef=self.config["actor_pessimism_coef"],
         ).reshape(batch_size, gen_per_obs)
 
-        support_q = self._score_action_set(
-            batch["observations"],
-            support_actions,
-            self.config["actor_q_agg"],
-            pessimism_coef=self.config["actor_pessimism_coef"],
-            critic="target_critic",
-        )
-        data_q = jnp.sum(support_q * normalize_support_weights(support_weights), axis=1)
+        support_weights = jax.lax.stop_gradient(support_weights)
+        positive_weights = support_weights
+        positive_weight_info = {}
+        if actor_update_mode in ("positive_drift", "positive_drift_plus_residual"):
+            support_q = self._score_action_set(
+                batch["observations"],
+                support_actions,
+                self.config["positive_q_agg"],
+                pessimism_coef=self.config["positive_pessimism_coef"],
+                critic="target_critic",
+            )
+            positive_weights, positive_weight_info = self._weight_support_from_scores(
+                support_weights,
+                support_q,
+                prefix="positive",
+            )
+        else:
+            support_q = self._score_action_set(
+                batch["observations"],
+                support_actions,
+                self.config["actor_q_agg"],
+                pessimism_coef=self.config["actor_pessimism_coef"],
+                critic="target_critic",
+            )
+        data_q = jnp.sum(support_q * _normalize_weights(positive_weights), axis=1)
 
         loss, info = offline_transport_drift_loss(
             gen=gen_actions,
             offline_actions=support_actions,
-            offline_weights=support_weights,
+            offline_weights=positive_weights,
+            positive_actions=support_actions,
+            positive_weights=positive_weights,
             adv_grad=q_grad,
             tau=self.config["drift_tau"],
             beta=self.config["drift_beta"],
             lambda_pi=self.config["drift_lambda_pi"],
             kernel_bandwidth=self.config["kernel_bandwidth"],
-            transport_step_size=self.config["transport_step_size"],
+            transport_step_size=self._transport_step_size(),
             normalize_q_grad=self.config["normalize_q_grad"],
             q_grad_clip_norm=self.config["q_grad_clip_norm"],
             exclude_self_kde=self.config["exclude_self_kde"],
@@ -253,6 +368,14 @@ class DriftAgent(flax.struct.PyTreeNode):
             bandwidth_scale=self.config["bandwidth_scale"],
             min_bandwidth=self.config["min_bandwidth"],
             max_bandwidth=self.config["max_bandwidth"],
+            kde_kernel=self.config["kde_kernel"],
+            compact_kernel_eps=self.config["compact_kernel_eps"],
+            compact_kernel_score_clip=self.config["compact_kernel_score_clip"],
+            compact_kernel_min_neighbors=self.config["compact_kernel_min_neighbors"],
+            compact_kernel_fallback=self.config["compact_kernel_fallback"],
+            compact_fallback_bandwidth=self.config["compact_fallback_bandwidth"],
+            actor_update_mode=actor_update_mode,
+            positive_drift_type=self.config["positive_drift_type"],
         )
         actor_loss = loss.mean()
         support_mse = jnp.min(
@@ -268,6 +391,8 @@ class DriftAgent(flax.struct.PyTreeNode):
             "data_advantage_mean": (data_q - gen_q.mean(axis=1)).mean(),
             "support_q_std_mean": support_q.std(axis=1).mean(),
             "support_mse": support_mse,
+            "transport_step_size": self._transport_step_size(),
+            **positive_weight_info,
         }
         return actor_loss, info
 
@@ -322,12 +447,16 @@ class DriftAgent(flax.struct.PyTreeNode):
         single_observation = observations.ndim == len(self.config["ob_dims"])
         observations = observations[None] if single_observation else observations
         num_samples = int(self.config["best_of_n"])
-        actions = self._sample_particles_with_model(observations, rng, num_samples)
+        eval_actor = self.config.get("eval_actor", "actor")
+        if eval_actor == "target_actor" and not bool(self.config.get("target_actor", False)):
+            eval_actor = "actor"
+        actions = self._sample_particles_with_model(observations, rng, num_samples, model=eval_actor)
         q = self._score_action_set(
             observations,
             actions,
             self.config["actor_q_agg"],
             pessimism_coef=self.config["actor_pessimism_coef"],
+            critic=self.config.get("eval_critic", "critic"),
         )
         indices = jnp.argmax(q, axis=-1)
         batch_shape = indices.shape
@@ -418,6 +547,8 @@ def get_config():
             pessimism_coef=0.5,
             actor_pessimism_coef=0.5,
             target_actor=True,
+            eval_actor="actor",
+            eval_critic="critic",
             target_actor_num_samples=8,
             best_of_n=8,
             noise_dim=None,
@@ -425,8 +556,24 @@ def get_config():
             drift_tau=0.75,
             drift_beta=1.0,
             drift_lambda_pi=1.0,
+            actor_update_mode="decomposed",
+            positive_drift_type="score",
+            positive_weighting="q_softmax",
+            positive_q_source="learned",
+            positive_q_agg="pessimistic",
+            positive_pessimism_coef=0.5,
+            positive_temp=0.5,
+            positive_topk=0,
+            positive_include_first_support=False,
+            positive_num_actor_candidates=0,
+            positive_stop_grad_weights=True,
+            positive_weight_clip_min=1.0e-6,
+            positive_weight_clip_max=1.0,
+            q_grad_scale=1.0,
             kernel_bandwidth=0.25,
             transport_step_size=0.05,
+            transport_step_size_after=0.0,
+            transport_step_size_schedule_step=0,
             normalize_q_grad=False,
             q_grad_clip_norm=10.0,
             exclude_self_kde=True,
@@ -435,16 +582,17 @@ def get_config():
             bandwidth_scale=1.0,
             min_bandwidth=1.0e-3,
             max_bandwidth=None,
+            kde_kernel="gaussian",
+            compact_kernel_eps=1.0e-6,
+            compact_kernel_score_clip=100.0,
+            compact_kernel_min_neighbors=1,
+            compact_kernel_fallback="nearest",
+            compact_fallback_bandwidth=0.0,
             conservative_coef=0.0,
             conservative_margin=0.0,
             n_conservative_actor_samples=0,
             conservative_q_agg="pessimistic",
             support_q_agg="pessimistic",
-            behavior_support_k=0,
-            behavior_support_temperature=1.0,
-            behavior_support_include_self=True,
-            behavior_support_normalize_observations=True,
-            behavior_support_chunk_size=65536,
             clip_grad=True,
             clip_grad_norm=1.0,
         )

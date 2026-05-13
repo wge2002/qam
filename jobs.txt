@@ -1,17 +1,42 @@
-# beta/lambda_pi ablation, fixed tau=0.75, best_of_n=8
+# Row 75 high-peak follow-up matrix: target is eval success >= 0.90.
+# Current running baseline, not queued here:
+#   DRIFT_AFFQ_TAU06_QCLIP5_TGTMAX_RTEMP_BROAD04_1M / W&B mc989w4j
+#   actual params: target_action_agg=max, target_actor_num_samples=8,
+#   affinity_temperatures=(0.02,0.05,0.2,0.4), affinity_goal_step_scale=0.75,
+#   drift_tau=0.6, q_grad_clip_norm=5.0, actor_pessimism_coef=0.0, best_of_n=8.
+# Current read at 2026-05-13: success 0.88 @ 50k/200k, 0.86 @ 250k,
+# 0.80 @ 300k, 0.84 @ 350k; W&B summary step 355k.
+# Latest summary: support_mse~0.0737, q_ensemble_std_mean~0.642,
+# max_total_velocity_norm~11.35. Baseline is close to 0.9 but not crossing it.
+# Design target: each row should have plausible upside to cross 0.90, not merely
+# stabilize final success. All rows use eval_interval=10000.
 
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B0_L0_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.0 --agent.drift_lambda_pi=0.0 --agent.drift_tau=0.75
+# 1) Question: is row75 already learning >0.9-capable actions, but best_of_n=8 misses them at eval?
+# Basis: row75 has repeated 0.88 early peaks; with an implicit actor, eval success can be selection-budget limited.
+# Test: keep training identical and raise eval/deployment candidate search from best_of_n=8 to 16.
+# Decision: this direction is promising if peak reaches >=0.90 without support_mse/q tail worsening.
+--run_group=drift_affinity_q_row75_highpeak --agent=agents/drift_affinity_q.py --tags=AFFQ_R75_BON16_1M --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --offline_steps=1000000 --eval_interval=10000 --save_interval=0 --auto_cleanup=False --agent.actor_pessimism_coef=0.0 --agent.best_of_n=16 --agent.conservative_coef=0.0 --agent.n_conservative_actor_samples=0 --agent.affinity_temperatures=(0.02,0.05,0.2,0.4) --agent.affinity_goal_step_scale=0.75 --agent.target_action_agg=max --agent.target_actor_num_samples=8 --agent.transport_step_size=0.05 --agent.drift_tau=0.6 --agent.q_grad_scale=1.0 --agent.q_grad_clip_norm=5.0 --agent.normalize_q_grad=False --agent.gen_per_obs=8
 
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B02_L0_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.2 --agent.drift_lambda_pi=0.0 --agent.drift_tau=0.75
+# 2) Question: is the critic bootstrap target still missing rare high-value next actions?
+# Basis: row73 max target improved final stability but not peak; row75's broad04 support made max target reach 0.88.
+# Test: increase target_actor_num_samples from 8 to 16 while keeping target_action_agg=max.
+# Decision: keep if peak crosses 0.90 and target_next_q rise corresponds to eval success, not just q_ensemble_std inflation.
+--run_group=drift_affinity_q_row75_highpeak --agent=agents/drift_affinity_q.py --tags=AFFQ_R75_TN16_1M --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --offline_steps=1000000 --eval_interval=10000 --save_interval=0 --auto_cleanup=False --agent.actor_pessimism_coef=0.0 --agent.best_of_n=8 --agent.conservative_coef=0.0 --agent.n_conservative_actor_samples=0 --agent.affinity_temperatures=(0.02,0.05,0.2,0.4) --agent.affinity_goal_step_scale=0.75 --agent.target_action_agg=max --agent.target_actor_num_samples=16 --agent.transport_step_size=0.05 --agent.drift_tau=0.6 --agent.q_grad_scale=1.0 --agent.q_grad_clip_norm=5.0 --agent.normalize_q_grad=False --agent.gen_per_obs=8
 
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B0_L02_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.0 --agent.drift_lambda_pi=0.2 --agent.drift_tau=0.75
+# 3) Question: is actor training particle coverage, not eval selection, the bottleneck near 0.9?
+# Basis: row75 trains on gen_per_obs=8 and evaluates best_of_n=8; if success needs rare latent branches, training may under-sample them.
+# Test: raise gen_per_obs from 8 to 16, leaving eval best_of_n=8 so the change is training coverage.
+# Decision: useful if peak >=0.90 or the 100k-400k curve lifts without relying on a larger eval budget.
+--run_group=drift_affinity_q_row75_highpeak --agent=agents/drift_affinity_q.py --tags=AFFQ_R75_G16_1M --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --offline_steps=1000000 --eval_interval=10000 --save_interval=0 --auto_cleanup=False --agent.actor_pessimism_coef=0.0 --agent.best_of_n=8 --agent.conservative_coef=0.0 --agent.n_conservative_actor_samples=0 --agent.affinity_temperatures=(0.02,0.05,0.2,0.4) --agent.affinity_goal_step_scale=0.75 --agent.target_action_agg=max --agent.target_actor_num_samples=8 --agent.transport_step_size=0.05 --agent.drift_tau=0.6 --agent.q_grad_scale=1.0 --agent.q_grad_clip_norm=5.0 --agent.normalize_q_grad=False --agent.gen_per_obs=16
 
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B01_L01_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.1 --agent.drift_lambda_pi=0.1 --agent.drift_tau=0.75
+# 4) Question: is row75 just slightly under-steered by Q inside the broad04 support geometry?
+# Basis: current q_step_rms~0.056 is controlled; row70's stronger Q failed without broad04/scale0.75, so this tests the buffered version.
+# Test: raise q_grad_scale from 1.0 to 1.25, with the same q_grad_clip_norm=5.0.
+# Decision: accept only if it creates a real peak >=0.90; reject if support_mse or velocity tails jump while success stays <=0.88.
+--run_group=drift_affinity_q_row75_highpeak --agent=agents/drift_affinity_q.py --tags=AFFQ_R75_Q125_1M --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --offline_steps=1000000 --eval_interval=10000 --save_interval=0 --auto_cleanup=False --agent.actor_pessimism_coef=0.0 --agent.best_of_n=8 --agent.conservative_coef=0.0 --agent.n_conservative_actor_samples=0 --agent.affinity_temperatures=(0.02,0.05,0.2,0.4) --agent.affinity_goal_step_scale=0.75 --agent.target_action_agg=max --agent.target_actor_num_samples=8 --agent.transport_step_size=0.05 --agent.drift_tau=0.6 --agent.q_grad_scale=1.25 --agent.q_grad_clip_norm=5.0 --agent.normalize_q_grad=False --agent.gen_per_obs=8
 
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B02_L02_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.2 --agent.drift_lambda_pi=0.2 --agent.drift_tau=0.75
-
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B05_L02_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.5 --agent.drift_lambda_pi=0.2 --agent.drift_tau=0.75
-
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B02_L05_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.2 --agent.drift_lambda_pi=0.5 --agent.drift_tau=0.75
-
---run_group=drift_sweep_b_lam --agent=agents/drift.py --tags=B05_L05_T075 --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --eval_interval=50000 --save_interval=0 --agent.drift_beta=0.5 --agent.drift_lambda_pi=0.5 --agent.drift_tau=0.75
+# 5) Question: is the support anchor still capping the achievable peak below 0.9?
+# Basis: row71 showed lower affinity scale can raise early peak but drift late; row75 adds broad04 + max target, so the high-upside version may tolerate less anchor.
+# Test: lower affinity_goal_step_scale from 0.75 to 0.65 while keeping broad04 and max target.
+# Decision: run this as a high-risk/high-upside row; it wins only if peak reaches >=0.90 before drift dominates.
+--run_group=drift_affinity_q_row75_highpeak --agent=agents/drift_affinity_q.py --tags=AFFQ_R75_A065_1M --seed=10001 --env_name=cube-double-play-singletask-task1-v0 --sparse=False --horizon_length=5 --agent.action_chunking=True --online_steps=0 --offline_steps=1000000 --eval_interval=10000 --save_interval=0 --auto_cleanup=False --agent.actor_pessimism_coef=0.0 --agent.best_of_n=8 --agent.conservative_coef=0.0 --agent.n_conservative_actor_samples=0 --agent.affinity_temperatures=(0.02,0.05,0.2,0.4) --agent.affinity_goal_step_scale=0.65 --agent.target_action_agg=max --agent.target_actor_num_samples=8 --agent.transport_step_size=0.05 --agent.drift_tau=0.6 --agent.q_grad_scale=1.0 --agent.q_grad_clip_norm=5.0 --agent.normalize_q_grad=False --agent.gen_per_obs=8

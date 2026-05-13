@@ -11,6 +11,7 @@ from agents.fawac import FAWACAgent
 from agents.rebrac import ReBRACAgent
 from agents.ifql import IFQLAgent
 from agents.drift import DriftAgent
+from agents.drift_affinity_q import DriftAffinityQAgent
 
 agents = dict(
     ifql=IFQLAgent,
@@ -26,4 +27,5 @@ agents = dict(
     rebrac=ReBRACAgent,
     dcgql=DCGQLAgent,
     drift=DriftAgent,
+    drift_affinity_q=DriftAffinityQAgent,
 )

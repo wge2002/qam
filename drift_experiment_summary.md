@@ -1,135 +1,160 @@
 # DRIFT 实验小结
-任务统一为 `cube-double-play-singletask-task1-v0`、`seed=10001`、`horizon_length=5`、`agent.action_chunking=True`、`online_steps=0`。
 
-## 实验 1：原始 DRIFT baseline
-命令核心：
-```bash
-MUJOCO_GL=egl python main.py \
-  --run_group=reproduce \
-  --agent=agents/drift.py \
-  --tags=DRIFT \
-  --seed=10001 \
-  --env_name=cube-double-play-singletask-task1-v0 \
-  --sparse=False \
-  --horizon_length=5 \
-  --agent.action_chunking=True \
-  --online_steps=0
-```
-评估结果：
-| step | success | return | length |
-| ---: | ---: | ---: | ---: |
-| 50k | 0.76 | -278.20 | 246.70 |
-| 100k | 0.48 | -483.52 | 370.92 |
-| 200k | 0.36 | -496.04 | 389.20 |
-| 300k | 0.26 | -637.26 | 424.02 |
-| 400k | 0.22 | -561.24 | 436.60 |
-| 500k | 0.14 | -642.28 | 462.22 |
+统一设置：`env_name=cube-double-play-singletask-task1-v0`、`seed=10001`、`horizon_length=5`、`agent.action_chunking=True`、`online_steps=0`。除特别说明外，`best_of_n=8`。
 
-关键现象：
-- 成功率从 50k 的 0.76 下降到 500k 的 0.14，后 5 次评估平均只有 0.184。
-- `actor/support_mse` 从约 0.033 降到约 0.014，说明 actor 越来越接近数据动作，但任务成功率反而下降。
-- `actor/behavior_score_rms` 大约 1.9 到 2.9，长期高于 `actor/q_score_rms` 的约 0.38 到 0.79。
-- `actor/target_step_rms` 大约 0.10 到 0.15，没有出现超大更新。
+---
 
-诊断：
-baseline 不是“学不动”，而是越训练越被行为分布/KDE 项拉向不一定能完成任务的动作区域。这里的证据是 support MSE 下降与 success 下降同时发生。critic 的值本身没有明显发散到无法解释的程度，所以不能只归因于 critic 崩了。
+## 当前训练状态（2026-05-13）
 
-## 实验 2：激进 Q-gradient 放大
-命令核心：
-```bash
-PYTHONNOUSERSITE=1 MUJOCO_GL=egl /home/fine/nvme0n1/conda-envs/qam/bin/python main.py \
-  --run_group=reproduce_drift_tune \
-  --agent=agents/drift.py \
-  --tags=DRIFT_QNORM_BETA02_TAU025 \
-  --seed=10001 \
-  --env_name=cube-double-play-singletask-task1-v0 \
-  --sparse=False \
-  --horizon_length=5 \
-  --agent.action_chunking=True \
-  --online_steps=0 \
-  --eval_interval=10000 \
-  --save_interval=10000 \
-  --agent.normalize_q_grad=True \
-  --agent.drift_beta=0.2 \
-  --agent.drift_tau=0.25
-```
-观察结果：
-- 10k、20k、30k、40k、50k、60k 的 success 都是 0.0。
-- `actor/q_score_rms` 被放大到约 4。
-- `actor/behavior_score_rms` 约 17，乘上 `beta=0.2` 后有效量级约 3.4。
-- `actor/policy_score_rms` 约 18，默认 `lambda_pi=1` 时 policy repulsion 量级过大。
-- `actor/target_step_rms` 约 0.85，远高于 baseline 的约 0.10。
+- 2026-05-13 11:35 +08 已改用本地 W&B API 直接拉数，不依赖 4090f SSH。4090f SSH 仍在 banner exchange 阶段超时，但 W&B 已能确认 row75 和 high-peak 后续的真实状态。
+- row75 `DRIFT_AFFQ_TAU06_QCLIP5_TGTMAX_RTEMP_BROAD04_1M` / W&B `mc989w4j` 已 `1000k` 完成。曲线为 `50k:0.88, 100k:0.86, 150k:0.74, 200k:0.88, 250k:0.86, 300k:0.80, 350k:0.84, 400k:0.84, 450k:0.76, 500k:0.78, 550k:0.80, 600k:0.72, 650k:0.74, 700k:0.74, 750k:0.88, 800k:0.70, 850k:0.76, 900k:0.74, 950k:0.82, 1000k:0.68`。峰值 `0.88`，final `0.68`，last5 `0.74`；组合接近但没有突破 `0.90`。
+- high-peak 队列已经至少跑出三条 W&B run：`AFFQ_R75_BON16_1M` / `xcu4mcey` finished，peak `0.92`、final `0.84`、last5 `0.768`；`AFFQ_R75_TN16_1M` / `ym964fdj` finished，peak `0.90`、final `0.78`、last5 `0.784`；`AFFQ_R75_G16_1M` / `ehkh3xmd` crashed at W&B step `365k`，但 eval 已多次达到 `0.94~0.96`，peak `0.96 @ 60k/100k/180k/240k/260k`，current `0.94 @ 360k`，last5 `0.896`。
+- 最新判断：冲 `0.90+` 的方向已经被验证，最强证据是 `gen_per_obs=16`。它不是单纯 eval 采样收益，而是训练粒子覆盖提升：`G16` 在 support_mse 更低 (`≈0.0455`) 的同时达到 `0.96`，明显优于 row75 的 `0.88` peak。下一步优先查 `G16` crash 原因，并尽快重跑/续跑该方向到 1M；`best_of_n=16` 也有效但主要是选择预算收益，`target_actor_num_samples=16` 边际较小。
+- 本地 `jobs.txt` 仍是 high-peak 队列，全部 `--eval_interval=10000`。远程恢复后优先检查 `AFFQ_R75_G16_1M` 的 crash log、队列是否继续跑 `Q125/A065`，并把剩余 W&B run 补入总表。
 
-诊断：
-这条实验验证了“直接加强 critic action-gradient”不是稳妥方向。critic 的局部 action-gradient 可能含噪声、尺度不稳，或者在离线数据支撑外给出错误方向；`normalize_q_grad=True` 加上较低 `tau=0.25` 后，actor 更新步长明显过大，早期就把策略推坏。
-因此，critic action-gradient 的质量不好是主要风险之一，但结论不是“critic 完全没用”，而是“不能让局部梯度主导大步 actor 更新”。如果 critic 还能排序动作价值，后续更适合用多候选动作的 value selection，而不是继续放大梯度。
+---
 
-## 实验 3：TOP3_REWEIGHT_B02_L02
-命令核心：
-```bash
-/home/fine/nvme0n1/conda-envs/qam/bin/python main.py \
-  --run_group=reproduce_drift_top3 \
-  --agent=agents/drift.py \
-  --tags=TOP3_REWEIGHT_B02_L02 \
-  --seed=10001 \
-  --env_name=cube-double-play-singletask-task1-v0 \
-  --sparse=False \
-  --horizon_length=5 \
-  --agent.action_chunking=True \
-  --online_steps=0 \
-  --eval_interval=50000 \
-  --save_interval=0 \
-  --agent.drift_beta=0.2 \
-  --agent.drift_tau=0.75 \
-  --agent.drift_lambda_pi=0.2
-```
+## Standalone toy diagnostics
 
-评估结果：
-| step | success | return | length |
-| ---: | ---: | ---: | ---: |
-| 50k | 0.14 | -498.32 | 451.26 |
-| 100k | 0.34 | -389.00 | 367.00 |
-| 200k | 0.42 | -349.10 | 342.78 |
-| 350k | 0.60 | -287.62 | 287.52 |
-| 500k | 0.52 | -348.26 | 327.92 |
-| 650k | 0.62 | -311.16 | 298.06 |
-| 750k | 0.64 | -273.66 | 270.72 |
-| 1000k | 0.42 | -365.88 | 348.32 |
+| 日期 | Run | 服务器 | 命令/脚本 | 结果路径 | 关键结论 |
+| --- | --- | --- | --- | --- | --- |
+| 2026-05-07 | `drift_theory_checks_smoke_20260507-134834` | `4090f` | `scripts/run_drift_diffusionql_bandits.py --tasks task2 --variants DRIFT_TASK2_SLOW_WIDER --steps 20000 --seeds 0 --diagnostics --check_theory_ablation --diag_grid_size 101 --non_amortized_particles --particle_flow_steps 100 --particle_flow_step_size 0.005 --lambda_pi_sweep 0.0,0.2,1.0 --bandwidth_sweep 0.05,0.1,0.25 --out_dir results/drift_theory_checks_smoke` | `projects/qam/results/4090f/drift_theory_checks_smoke_20260507-134834/results/drift_theory_checks_smoke` | Diffusion-QL bandit task2 theory check 跑通。原 `kernel_bandwidth=0.50` 的 learned-Q/KDE actor 最终 `optimal_in_support=0.0, off_support=1.0`；`oracle_Q+oracle_score+no_repulse` 保持在 support (`optimal_in_support=0.9904`)；`learned_Q+oracle_score+no_repulse` 也保持在 support (`0.996`)；`BW0.25` 基本修复 (`optimal_in_support=0.9998, off_support=0.0002`)。主因是 learned Q 的 off-support peak 叠加过宽/过弱 KDE score；repulsion 会放大但不是必要条件。 |
+| 2026-05-07 | `drift_compact_kernel_bandit_20260507-143459` | `4090f` | `scripts/run_drift_diffusionql_bandits.py --tasks task2 --variants COMPACT_EPAN_BW0p25_NO_REPULSE,COMPACT_EPAN_BW0p5_NO_REPULSE,COMPACT_EPAN_BW0p75_NO_REPULSE,COMPACT_BUMP_BW0p25_NO_REPULSE,COMPACT_BUMP_BW0p5_NO_REPULSE,COMPACT_EPAN_BW0p25_REPULSE,COMPACT_BUMP_BW0p25_REPULSE,GAUSS_BW0p25_NO_REPULSE,GAUSS_BW0p5_NO_REPULSE,LEARNED_Q_ORACLE_SCORE_NO_REPULSE --steps 20000 --seeds 0 --diagnostics --diag_grid_size 101 --out_dir results/drift_compact_kernel_bandit` | `projects/qam/results/4090f/drift_compact_kernel_bandit_20260507-143459/results/drift_compact_kernel_bandit` | Compact-support KDE bandit 对照跑通。所有 compact no-repulse 变体 final `optimal_in_support=1.0, hard_reward=5.0, off_support=0.0`；compact+repulse 仍健康 (`off_support≈0.018~0.021`)；`GAUSS_BW0p25_NO_REPULSE` 也成功，但 `GAUSS_BW0p5_NO_REPULSE` 复现失败 (`optimal_in_support=0, off_support=1`)。说明核心是 Gaussian BW0.5 soft-tail/score 尺度问题；compact kernel 在较大半径下也能避免 off-support stationary point。 |
+| 2026-05-08 | `drift_positive_drift_bandit_20260508` | `4090f` | task2 full: `POSDRIFT_GAUSS_BW0p5_QSOFT_T0p5,POSDRIFT_GAUSS_BW0p5_QSOFT_T1,POSDRIFT_GAUSS_BW0p5_QTOPK4_T0p5,POSDRIFT_GAUSS_BW0p5_QTOP1,POSDRIFT_EPAN_BW0p5_QSOFT_T0p5,POSDRIFT_EPAN_BW0p5_QTOPK4_T0p5,POSDRIFT_EPAN_BW0p5_QTOP1,DECOMP_GAUSS_BW0p5_QSOFT_T0p5 --steps 20000 --diagnostics`; task1 smoke: `POSDRIFT_GAUSS_BW0p5_QSOFT_T0p5,POSDRIFT_EPAN_BW0p5_QSOFT_T0p5,POSDRIFT_EPAN_BW0p5_QTOPK4_T0p5` | `projects/qam/results/4090f/drift_positive_drift_bandit_20260508/drift_positive_drift_bandit` | 新增 `actor_update_mode=positive_drift`，Q 只给 support candidates 构造 `p_Q` 权重，generated action 上 `q_score_rms=0`。task2 上 Gaussian BW0.5 positive drift 解决旧 off-support failure：`QTOP1` final `optimal_in_support=1.0, hard_reward=5.0, off_support=0.0`，`QTOPK4` final `0.9994/4.997/0.0006`；`QSOFT_T0p5` 最好在 5k 接近满分但 final 回落到 `0.838/4.20/0.159`，`T1` 更软更差。EPAN positive drift 虽然 `positive_selected_optimal_fraction=1.0`，但 actor final off-support `0.63~0.82`，说明 compact score/repulsion 几何在这个 positive-drift 实现里反而不稳。decomposed Gaussian 也满分，但依赖 generated-action Q-gradient (`final_q_score_rms=0.423`)；cube 下一步建议先跑 `POSDRIFT_GAUSS_BW0p5_QTOPK4_T0p5`，top1 作为 ablation。 |
+| 2026-05-08 | `drift_twostage_bandit_20260508` | `4090f` | `scripts/run_drift_twostage_bandit.py --tasks task2 --steps_behavior 20000 --steps_policy 20000 --seeds 0 --out_dir results/drift_twostage_bandit`; task1 smoke 另跑 `--steps_behavior 5 --steps_policy 5` | `projects/qam/results/4090f/drift_twostage_bandit_20260508/drift_twostage_bandit` | 两阶段 positive drifting 跑通：Stage 1 behavior generator 使用 `positive_drift + uniform` 学 `μ_off`，final `behavior_mode_balance_error=0.017`, `behavior_off_support=0.091`, critic 排名 optimal=bottom。Stage 2 冻结 behavior generator，用其 samples + Q weighting 构造 `p_Q`，不使用 generated-action Q-gradient；所有 two-stage positive 行 `final_q_score_rms=0`。task2 Gaussian BW0.5 成功：`QTOP1` final `optimal_in_support=0.977, hard_reward=4.883, off_support=0.023`；`QTOPK4` final `0.963/4.815/0.037`，推荐 cube 先试更稳的 `TWOSTAGE_POSDRIFT_GAUSS_BW0p5_QTOPK4_T0p5`。`QSOFT_T0p5` 有效但偏软 (`0.824/4.134/0.171`)；EPAN two-stage 仍失败 (`off_support=0.67~0.79`)。direct dataset QSOFT 比 behavior-generator QSOFT 稍强 (`0.890/4.465/0.105`)，但不如 behavior-generator QTOPK/TOP1；decomposed Q-weight baseline 最高 (`0.988/4.938/0.012`) 但依赖 `q_score_rms=0.277`。 |
+| 2026-05-08 | `drift_twostage_behavior_bw_sweep_20260508` | `4090f` | `scripts/run_drift_twostage_bandit.py --tasks task2 --variants STAGE1_BEHAVIOR_ONLY --steps_behavior 20000 --steps_policy 0 --seeds 0 --behavior_kernel gaussian --behavior_bandwidth {0.05,0.10,0.15} --out_dir results/drift_twostage_behavior_bw_sweep/bw_*` | `projects/qam/results/4090f/drift_twostage_behavior_bw_sweep_20260508/drift_twostage_behavior_bw_sweep` | 只跑 Stage 1 behavior generator，小 bandwidth 没有修复 density fitting。final 指标：BW0.05 `balance=0.026, off@0.25=0.095, mean_min_dist=0.202, p90=0.238`；BW0.10 `0.021/0.093/0.200/0.235`；BW0.15 `0.024/0.087/0.198/0.226`；原 BW0.25 `0.017/0.091/0.201/0.225`。图上三者仍是四模态覆盖 + diamond/bridge，不是四个 `std=0.05` 紧团。结论：问题主要不是 positive KDE bandwidth，而是 Stage 1 `V_p - V_q` objective/repulsion 形态；下一步应 sweep `drift_lambda_pi` 到 `0/0.1/0.2/0.5` 或改用更直接的 BC/MLE behavior generator。 |
+| 2026-05-08 | `drift_twostage_behavior_particles_sweep_20260508` | `4090f` | `scripts/run_drift_twostage_bandit.py --tasks task2 --variants STAGE1_BEHAVIOR_ONLY --steps_behavior 20000 --steps_policy 0 --seeds 0 --behavior_kernel gaussian --behavior_bandwidth 0.25 --behavior_gen_per_obs {32,64} --out_dir results/drift_twostage_behavior_particles_sweep/gen_*` | `projects/qam/results/4090f/drift_twostage_behavior_particles_sweep_20260508/drift_twostage_behavior_particles_sweep` | 增大 Stage 1 generated particles 明显改善 behavior density fitting。默认 `gen_per_obs=8` final `off@0.25=0.091, mean_min_dist=0.201, p50=0.200, p90=0.225`；`gen_per_obs=32` 变为 `0.062/0.076/0.039/0.150`；`gen_per_obs=64` 变为 `0.058/0.072/0.038/0.142`，四模态比例仍均衡 (`balance≈0.026~0.027`)。图上四团明显收紧，diamond/bridge 仍有但少很多。结论：之前 behavior generator 差的关键原因之一是 q-density negative score 用 `G=8` 粒子估计太粗，增加 particles 比减小 bandwidth 更有效；下一步可用 `behavior_gen_per_obs=64` 重跑 two-stage policy，或再叠加较小 `lambda_pi`。 |
+| 2026-05-08 | `drift_twostage_behavior_particles_long_20260508` | `4090f` | `scripts/run_drift_twostage_bandit.py --tasks task2 --variants STAGE1_BEHAVIOR_ONLY --steps_behavior 100000 --steps_policy 0 --seeds 0 --behavior_kernel gaussian --behavior_bandwidth 0.25 --behavior_gen_per_obs 64 --out_dir results/drift_twostage_behavior_particles_long/gen_64_100k` | `projects/qam/results/4090f/drift_twostage_behavior_particles_long_20260508/drift_twostage_behavior_particles_long` | 多粒子 behavior generator 长训继续改善。`gen64_20k` 为 `balance=0.027, off@0.25=0.058, mean_min=0.072, p50=0.038, p90=0.142`；`gen64_100k` 变为 `balance=0.012, off@0.25=0.033, mean_min=0.060, p50=0.030, p90=0.135`，四模态比例几乎完全均衡。图上更接近四个紧团，但仍有少量 diamond/bridge；收益主要在 20k→50k，之后缓慢下降。结论：长训有用，但 `p90` 仍明显大于 dataset std=0.05，若要更高保真应继续叠加低 `lambda_pi` 或直接 BC/MLE behavior model。 |
+| 2026-05-08 | `drift_twostage_from_gen64_100k_20260508` | `4090f` | `scripts/run_drift_twostage_bandit.py --tasks task2 --variants TWOSTAGE_POSDRIFT_GAUSS_BW0p5_QSOFT_T0p5,TWOSTAGE_POSDRIFT_GAUSS_BW0p5_QTOPK4_T0p5,TWOSTAGE_POSDRIFT_GAUSS_BW0p5_QTOP1,TWOSTAGE_POSDRIFT_EPAN_BW0p5_QSOFT_T0p5,TWOSTAGE_POSDRIFT_EPAN_BW0p5_QTOPK4_T0p5 --steps_behavior 0 --steps_policy 20000 --behavior_checkpoint results/drift_twostage_behavior_particles_long/gen_64_100k/task2/behavior_generator/seed_0/checkpoint/params_100000.pkl` | `projects/qam/results/4090f/drift_twostage_from_gen64_100k_20260508/drift_twostage_from_gen64_100k` | 用 `gen64_100k` behavior checkpoint 继续跑 Stage 2 positive drifting。加载后的 behavior eval `balance=0.016, off@0.25=0.033`，critic rank OK。Gaussian 仍成功且不使用 generated-action Q-gradient：`QSOFT_T0p5` final `optimal_in_support=0.881, hard_reward=4.422, off=0.113, q_score_rms=0`，较原 two-stage QSOFT `0.824/4.134/0.171` 有改善；`QTOPK4` `0.964/4.820/0.036` 与原 `0.963/4.815/0.037` 基本持平；`QTOP1` `0.978/4.890/0.022` 与原 `0.977/4.883/0.023` 持平。EPAN 仍失败 (`off=0.58~0.87`)。结论：更好的 behavior generator 主要改善 soft weighting，对 topk/top1 边际小；cube 推荐仍是 Gaussian QTOPK4，behavior stage 用 `gen_per_obs=64` 长训 checkpoint。 |
 
-关键现象：
-- 最高 success 达到 0.64，出现在 750k。
-- 500k 时 success 是 0.52，明显高于 baseline 500k 的 0.14。
-- 后 5 次评估平均 success 约 0.448，也明显高于 baseline 后 5 次的 0.184。
-- `actor/target_step_rms` 约 0.027 到 0.037，比 baseline 更小，也远小于激进 Q-gradient 实验的约 0.85。
-- `actor/q_score_rms` 约 0.82 到 1.00，高于 baseline；`actor/behavior_score_rms` 约 4.3 到 5.3，但乘上 `beta=0.2` 后有效量级约 0.86 到 1.06。
-- `actor/policy_score_rms` 约 0.53 到 1.21，乘上 `lambda_pi=0.2` 后有效量级约 0.11 到 0.24。
+---
 
-诊断：
-这条实验是目前最有价值的正向证据。它没有放大 critic gradient，而是把行为项和 policy repulsion 的有效权重降下来，同时用较温和的 `tau=0.75` 控制更新尺度。结果上，它没有 baseline 那种一路坠落，500k 之后仍能多次达到 0.5 到 0.64 的 success。
-这说明：baseline 的失败更可能来自 actor 目标中各个 score 的相对权重不合适，而不是 critic 完全不可用。降低 `drift_beta` 和 `drift_lambda_pi` 能让 actor 少被不必要的约束/排斥拖偏，同时避免激进 Q-gradient 那种大步离线外推。
+## 实验总表
 
-## 实验 4：TOP3_BEST32（进行中）
-命令核心：
-```bash
-/home/fine/nvme0n1/conda-envs/qam/bin/python main.py \
-  --run_group=reproduce_drift_top3 \
-  --agent=agents/drift.py \
-  --tags=TOP3_BEST32 \
-  --seed=10001 \
-  --env_name=cube-double-play-singletask-task1-v0 \
-  --sparse=False \
-  --horizon_length=5 \
-  --agent.action_chunking=True \
-  --online_steps=0 \
-  --eval_interval=50000 \
-  --save_interval=0 \
-  --agent.drift_beta=0.2 \
-  --agent.drift_tau=0.75 \
-  --agent.drift_lambda_pi=0.2 \
-  --agent.best_of_n=32
-```
+| 行 | 配置 | W&B | 测试内容 | 调参内容 | 状态 | 峰值 success | 最终/当前 success | 最近 5 次均值 | 简评 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `DRIFT` baseline | `exktmugq`（killed） | 默认 DRIFT 自然收敛 | 默认 `beta=1.0`、`lambda_pi=1.0`、`tau=0.75` | `500k` 手动停止 | `0.76 @ 50k` | `0.14 @ 500k` | `0.184` | 越训越差；behavior+policy 合计 >>Q，actor 几乎纯 BC+排斥 |
+| 2 | `DRIFT_QNORM_BETA02_TAU025` | 未找到 | critic 局部梯度主导 | `normalize_q_grad=True`、`beta=0.2`、`tau=0.25` | `60k` 即停 | `0.00` | `0.00` | `0.000` | 激进 Q-gradient 直接失败 |
+| 3 | `TOP3_REWEIGHT_B02_L02` | `xkesvv4o` | 温和 `beta/lambda/tau` 能否稳 | `beta=0.2`、`lambda_pi=0.2`、`tau=0.75` | `1000k` | `0.64 @ 750k` | `0.42 @ 1000k` | `0.448` | 第一条稳定正向 |
+| 4 | `TOP3_BEST32` | `j3qnq1hi` | 更大 best_of_n 是否有效 | 上行基础改 `best_of_n=32` | `1000k` | `0.70 @ 350k/450k` | `0.52 @ 1000k` | `0.540` | 评估时 log 级收益，训练指标和 `B02_L02` 完全一致 |
+| 5 | `B0_L0_T075` | `80nr1dz3` | 去掉 behavior + repulsion | `beta=0.0`、`lambda_pi=0.0` | `1000k` | `0.00` | `0.00` | `0.000` | 全灭，actor 完全失控 |
+| 6 | `B02_L0_T075` | `a86w4c5v` | 只保留 behavior | `beta=0.2`、`lambda_pi=0.0` | `1000k` | `0.44` | `0.38` | `0.332` | β>0 就能恢复中等水平 |
+| 7 | `B0_L02_T075` | `8qrwfimb` | 只保留 repulsion | `beta=0.0`、`lambda_pi=0.2` | `1000k` | `0.00` | `0.00` | `0.000` | λ 单独救不回来 |
+| 8 | `B01_L01_T075` | `jk8lwf1o` | 轻度 β + 轻度 λ | `beta=0.1`、`lambda_pi=0.1` | `1000k` | `0.54` | `0.20` | `0.260` | 早期冲但后期不稳 |
+| 9 | `B02_L02_T075` | `7n20cnu7` | 中等 β + 中等 λ | `beta=0.2`、`lambda_pi=0.2` | `1000k` | `0.58` | `0.44` | `0.380` | pessimism=0.5 下的 1M 基线 |
+| 10 | `B05_L02_T075` | `f8oxp3hx` | 更强 β + 中等 λ | `beta=0.5`、`lambda_pi=0.2` | `1000k` | `0.56` | `0.44` | `0.424` | 终值追平 B02_L02 但 return/length 更差 |
+| 11 | `B02_L05_T075` | `bhvy1uo9` | 中等 β + 强 λ | `beta=0.2`、`lambda_pi=0.5` | `400k` 停 | `0.00` | `0.00` | `0.000` | λ=0.5 把粒子推出 support，全灭 |
+| 12 | `B05_L05_T075` | `t2bu1p4b` | 更强 β + 强 λ | `beta=0.5`、`lambda_pi=0.5` | `1000k` | `0.48` | `0.40` | `0.400` | 高 β 部分对冲强 λ |
+| 13 | `B02_L02_T075_S003` | `itbpymzs` | 更小 transport_step_size | `transport_step_size=0.001` | `1000k` | `0.60 @ 800k` | `0.50 @ 1000k` | `0.512` | S005 默认下 step_size sweep 甜蜜点附近 |
+| 14 | `B02_L02_T075_S007` | `hboi6xwu` | 更大 transport_step_size | `transport_step_size=0.07` | `1000k` | `0.54 @ 950k` | `0.28 @ 1000k` | `0.436` | 比 0.05 默认不稳，峰值相当但波动大 |
+| 15 | `B02_L02_T060_S005` | `49esxld4` | 更强 Q-score 权重（tau↓） | `tau=0.50` | `1000k` | `0.58 @ 100k` | `0.40 @ 1000k` | `0.408` | 早峰高但无中后期提升 |
+| 16 | `B02_L02_T075_S0001` | `fchmah9t` | 极小 transport_step_size | `transport_step_size=0.0001` | `850k` 停 | `0.52 @ 350k` | `0.24 @ 850k` | `0.352` | 步长过小，中后期学不动 |
+| 17 | `IQL_TGT_ONLY_B02_L02_T075` | `jflidvsn` | 用 V(s') 替 critic target（IQL） | NOPESS 基础 + `use_iql_target=True`, `iql_expectile=0.9` | `300k` | `0.14 @ 50k~100k` | `0.00 @ 300k` | `0.08` | V 学不到上分位（play data 单动作），critic 随 V 塌到 -191 |
+| 18 | `IQL_FULL_B02_L02_T075_K09_T03` | `4n6uph62` | IQL target + AWR actor 重加权 | 上行 + `use_awr_weight=True`, `awr_inv_temp=3.0` | `230k` 停 | `0.12 @ 25k` | `0 @ 200k` | `0.04` | AWR 权重频繁撞上限 100，actor 依 5% 样本学，崩 |
+| 19 | `NOPESS_B02_L02_T075` | `j7vjx4ib` | 首次 NOPESS（pessimism=0） | `actor_pessimism_coef=0.0` | `275k` 手动停 | `0.68 @ 225k` | `0.50 @ 275k` | `0.544` | 峰值已超 baseline 1M 生涯最高 0.58 |
+| 20 | `NOPESS_MAX_B02_L02_T075` | `6qwv2gsx` | NOPESS + target max 聚合 | 上行 + `target_action_agg=max` | `300k` | `0.60 @ 300k` | `0.60` | 和 NOPESS 同级别，max 选法没抬 Q 反而让 bootstrap 更负 |
+| 21 | `NOPESS_QAMTGT_B02_L02_T075` | `f3cboawb` | QAM 风格两阶段 target | 上行 + `use_qam_style_target=True` | `410k` 停 | `0.46 @ 300k/350k` | `0.38 @ 400k` | `0.448` | 不如 NOPESS 也不如 baseline，两阶段选-估在 DRIFT 架构下没收益 |
+| 22 | `DIRECTQ_NOPESS_B02_L02_T075` | `8rmay1ag` | 纯 -Q(gen) 直接梯度下降 | NOPESS + `use_direct_q_loss=True`, `direct_q_bc_coef=0.0` | `135k` 停 | `0.00` | `0.00` | `0` | actor 跑 OOD, support_mse 飙到 1.2, q_mean 塌到 -193 |
+| 23 | `DIRECTQ_BC10_B02_L02_T075` | `5dx9zu4s` | FQL 风格 -Q/|Q|_d + BC 护栏 | 上行 + `direct_q_bc_coef=10.0` | `135k` 停 | `0.28 @ 50k` | `0.06 @ 100k` | `0.14` | BC 把 actor 拉在 support 内 (suppMSE=0.03) 但 critic 仍塌 (-200) |
+| 24 | `NOPESS_1M_B02_L02_T075` | `j3i842wt` | **NOPESS 完整 1M 基线** | NOPESS 默认 | **`1000k` ✓** | `0.68 @ ??k` | **`0.62 @ 1M`** | `~0.58` | **当前 DRIFT 最强干净基线**；比 baseline +40% relative；episode length 297（QAM 同任务 50） |
+| 25 | `NOPESS_3FORCE_DIRECT_B02_L02` | `rzx80qed` | 三力重写为 gradient-flowing loss | NOPESS + `use_3force_direct_loss=True` | `190k` 停 | `0.12 @ 25k` | `0.02 @ 190k` | `0.04` | 同 DIRECTQ 模式：actor 飞快 → critic 塌 -198；Q 饱和后 actor 只剩 BC+排斥方向 |
+| 26 | `NOPESS_B01_L02_T075` | `oi4j9lex` | 方向 A：β 减半测 behavior 拉力强度 | NOPESS + `drift_beta=0.1` | `125k` 停 | `0.00 @ 50k/100k` | `0.00 @ 125k` | `0` | **证伪"β=0.2 过强"假设**。pess=0 下 β 减半双重护栏同时弱化，actor 100k 前跑出 support：`support_mse 1.07`、`behavior_score_rms 16.4`（NOPESS 4.7 的 3.5x）、`q_mean -197` 塌 floor。结论：`actor_pessimism_coef=0.5` 原来兼任 OOD 隐式护栏；NOPESS 下减 β 必须同时补别的约束 |
+| 27 | `NOPESS_AWRBEH_B02_L02` | `51sap9iq` | 方向 D：KDE behavior_score 整体替换为 AWR 加权 (awr_target - gen) 方向 | NOPESS + `behavior_support_k=16` (GPU 预计算 KNN 表), `use_awr_behavior=True`, `awr_behavior_temp=3.0` | `100k` 停 | `0.00 @ 50k/100k` | `0.00` | `0` | **证伪"用 AWR 方向替换 KDE"的实现**。数学上 KDE score ∇log p_beh 在 support 外尾部**无界增大**(log→-∞ 的梯度)，是 actor 回弹的关键；AWR target 是 support 动作凸组合方向，幅度**永远 O(1)**。实测 `behavior_score_rms=1.06` (NOPESS 的 4.7 的 1/4.4)，actor 100k 内跑到 `support_mse 1.02`，`q_mean -197` 塌 floor。`awr_behavior_weight_max=0.25` (1/K=0.0625 的 4x) 证明 AWR 选择本身有效，但整体拉力太弱——替换路径错，应"保留 KDE 但用 AWR 权重加权 KDE 的参考点" |
+| 28 | `NOPESS_AWRKDE_K64_B02_L02` | `zhfvmpz6` | 方向 X：保留 KDE behavior_score 但把 KDE 的 ref_weights 从"距离 softmax"换成"Q 的 AWR softmax" | NOPESS + `behavior_support_k=64` (GPU 预计算 174s), `use_awr_behavior=True`, `awr_behavior_temp=3.0` | `270k` 停 | `0.04 @ 150k/250k` | `0.04 @ 270k` | `0.028` | **训练稳定但 env success 崩**。Q 指标健康：`q_mean=-87`、`support_mse=0.14`、`behavior_score_rms=6.0`（和 NOPESS 相当）、`data_advantage=-6`（比 NOPESS -5.7 稍强）。actor 确实被 KDE 拉向"AWR 加权中心"，`awr_max=0.23-0.37` 证明 AWR 选择生效。但 env 上 success 全灭：**经典"加权凸组合掉进非凸高 Q 区之间的低 Q 谷"**——critic 在凸组合点给高 Q 是外插错误，env 不认。结论：用 AWR 加权 KDE ref_weights 不能替代"单点 mode 选择"；方向 X 也被证伪 |
+| 29 | `NOPESS_SINK_K64_EPS1_W2` | `3cwag6bu` | 方向 3a：entropic Sinkhorn OT per-particle assignment，加为 extra velocity 项（保留 KDE） | NOPESS + `behavior_support_k=64` (KNN cache 秒加载), `use_sinkhorn_behavior=True`, `sinkhorn_eps=1.0`, `sinkhorn_q_temp=3.0`, `sinkhorn_iters=10`, `sinkhorn_weight=2.0` | `235k` 停 | `0.22 @ 100k` | `0.20 @ 235k` | `0.18` | **训练稳定但速度慢于 NOPESS**。Q 健康 -99.9、support_mse=0.045（比 NOPESS 0.14 更贴）、`sinkhorn_row_max=0.91` 证明 per-particle sharp 分配（非凸组合）。但 success 50k=0.04 / 100k=0.22 / 235k=0.20，**明显低于 NOPESS 同步（0.20/0.38/0.50）**。根源：8 个粒子各 lock 到 1 个 support 点（sinkhorn_row_max=0.91 极锐），但这 8 点都来自 obs-KNN，其 action 多样性有限 → actor 探索受限。理论层面 metric：**复合泛函 α·KL + (1-α)·Sinkhorn 偏离 method.tex 的"单一泛函"叙事**。共同问题：所有确定性梯度流方法都卡在"local optima of log p\*"——这是 W2 flow 的硬数学限制，不是实现问题 |
+| 30 | `LANGEVIN_K5_B100_NOPESS_1M` | `azoedpsc` | 方向 5b：5 步 Langevin rollout（β=100 噪声极弱，≈纯多步 Euler 的 isolation） | NOPESS + `use_langevin=True`, `langevin_steps=5`, `langevin_beta=100` | `1000k` 完 | `0.66 @ 650k` | `0.50 @ 1000k` | `0.444` | **多步 Euler 单独不 help**。noise/step=0.014（噪声忽略不计），等效于"5 步确定性 Euler"。peak 0.66 略高于 NOPESS 0.68 峰，但 final 0.50 < NOPESS 0.62。`step_rms=0.040` (NOPESS 0.026)，actor 学的目标比 NOPESS 远 ~50%，单步 actor 难以良好 amortize 5 步动力学终点 → final 反而下降 |
+| 31 | `LANGEVIN_K5_B10_NOPESS_1M` | `gq1ioawi` | 方向 5b：5 步 Langevin，β=10（中等噪声 + 中等深度） | NOPESS + `langevin_steps=5`, `langevin_beta=10` | `1000k` 完 | `0.56 @ 100k` | `0.28 @ 1000k` | `0.300` | 早冲后退典型形态。peak 0.56 < NOPESS 0.68，final 0.28 << NOPESS 0.62。Q 健康（-111），无塌陷；但 `step_rms=0.10` 比 NOPESS 大 4x，actor 回归更难，加上 noise/step=0.045 持续扰动 → 训练后期不稳 |
+| 32 | `LANGEVIN_K5_B1_NOPESS_1M` | `qj3s8c4y` | 方向 5b：5 步 Langevin，β=1（典型 Langevin 温度，最强噪声） | NOPESS + `langevin_steps=5`, `langevin_beta=1` | `1000k` 完 | `0.48 @ 900k` | `0.44 @ 1000k` | `0.424` | 强噪声反而更稳（noise/step=0.141 大但均匀），actor 学到"平均行为"。final 0.44 比 K5_B10 高，但仍远低于 NOPESS 0.62。说明 noise 不是核心问题 |
+| 33 | `LANGEVIN_K10_B10_NOPESS_1M` | `hx4e1i43` | 方向 5b：10 步 Langevin（最深 rollout）+ β=10 | NOPESS + `langevin_steps=10`, `langevin_beta=10` | `1000k` 完 | `0.66 @ 900k` | `0.38 @ 1000k` | `0.504` | K=10 比 K=5 略好（peak 0.66 vs 0.56；last5 mean 0.504 vs 0.300）。但 final 仍 < NOPESS。`policy_score_rms=1.91`（NOPESS 1.37）说明粒子在 10 步内过度发散。增加 K 边际收益小 |
+| 34 | `LANGEVIN_K3_B3_NOPESS_1M` | `2abla8k5` | 方向 5b：浅 rollout (K=3) + 强噪声 (β=3) | NOPESS + `langevin_steps=3`, `langevin_beta=3` | `1000k` 完 | `0.62 @ 800k` | `0.18 @ 1000k` | `0.360` | 单步噪声 0.105 + 累积只 3 步 → actor 看到"局部高噪声、低结构"目标，learning signal 噪声大。final 0.18 最差 |
+| 35 | `RTG_SUP_W05` | `3ixiajgn` | RTG critic supervision：用 Monte-Carlo RTG 监督 `Q(s,a_data)` | NOPESS 基础 + `use_rtg_supervision=True`, `rtg_supervision_weight=0.5` | `300k` 手动停 | `0.00` | `0.00 @ 300k` | `0.000` | **证伪单独 RTG 监督**。critic 被 RTG MSE 强压，`rtg_loss=318`、`q_mean=-157.5`，actor 没获得可执行高 success 策略。RTG 作为标量监督不能自动修复 actor 的 mode 选择问题 |
+| 36 | `RTG_KDE_T50_K64` | `fya5l55g` | RTG-weighted KDE：KNN support 的 KDE ref_weights 改为 `softmax(RTG/50)` | NOPESS 基础 + `behavior_support_k=64`, `use_rtg_kde=True`, `rtg_kde_temp=50.0` | `350k` 手动停 | `0.08 @ 300k` | `0.06 @ 350k` | `0.064` | **证伪软 RTG-KDE 加权**。训练指标不塌：`q_mean≈-88`、`support_mse=0.141`、`target_step_rms=0.0567`，但 env success 近乎全灭。说明软权重仍把 actor 拉向高 RTG support 的加权几何中心，不能解决 cube-double 的离散 mode 选择 |
+| 37 | `RLDRIFT_QW_K64_ENT1` | `evbdxay2` | 原始 drifting_policy 粒子 affinity loss 的 RL 适配版 | `fixed_pos=support_actions`, `weight_pos=softmax(Q_support/50)*K`, `entropy_coef=1.0` | `150k` 手动停 | `0.00` | `0.00 @ 150k` | `0.000` | **直接接入原始 affinity loss 过猛**。`support_mse≈0.027-0.033` 说明 actor 贴 support，但 `target_step_rms≈0.87-0.91`，比 NOPESS ~0.026 大 30x+；critic `q_mean≈-195~-199` 接近 reward floor，env return/length 全为 `-500/500`。结论：原始 loss 的 normalized force 不能无步长地替换当前 actor target，需显式缩放/调小 force 或重新设计接入口 |
+| 38 | `NOPESS_B02_L02_T060_1M` | `ykik8ozl` | j3i842wt 后续：NOPESS 下调 `tau` 增强 Q-score | NOPESS + `drift_tau=0.6` | `1000k` ✓ | `0.60 @ 550k` | `0.56 @ 1M` | `0.444` | 未超过 `j3i842wt`。`q_score_rms=1.04`、`target_step_rms=0.0289` 仍健康，但 last5 波动大；低 tau 提升 Q 影响后没有带来更高平台 |
+| 39 | `NOPESS_MAX_B02_L02_T090_1M` | `97jfb0r0` | j3i842wt 后续：max target 聚合跑满 1M + 较软 Q-score | NOPESS + `target_action_agg=max`, `drift_tau=0.9` | `1000k` ✓ | `0.62 @ 450k` | `0.50 @ 1M` | `0.500` | 不如 `j3i842wt`，但三条里最稳。`target_step_rms=0.0256`、`support_mse=0.071` 健康；max target 没把成功 continuation 明显抬出来 |
+| 40 | `MIDPESS_B03_L01_T060_1M` | `hovdt2wd` | exktmugq 与 j3i842wt 折中：恢复少量 actor pessimism、降 beta/lambda、低 tau | `actor_pessimism_coef=0.25`, `beta=0.3`, `lambda_pi=0.1`, `tau=0.6` | `1000k` ✓ | `0.44 @ 750k` | `0.34 @ 1M` | `0.272` | 明显差于 NOPESS。`target_next_q_std_mean=0.044` 过低、final return/length 更差；少量 actor pessimism 没接住 exktmugq 早峰，反而压弱策略改良 |
+| 41 | `COMPACT_EPAN_BW025_NOPESS_B02_L02_T075_1M` | `79qb6is9` | compact-support KDE 从 bandit 迁移到 cube-double-task1 | NOPESS 基础 + `kde_kernel=epanechnikov`, `kernel_bandwidth=0.25`, `compact_kernel_fallback=nearest`, `compact_kernel_score_clip=100` | `1000k` ✓ | `0.58 @ 350k` | `0.32 @ 1M` | `0.400` | **不如 NOPESS 1M 基线** (`j3i842wt`: peak 0.68, final 0.62, last5 ~0.58)。训练数值稳定、无 NaN，final `support_mse=0.087`, `q_mean=-114`, `q_score_rms=0.93`, `behavior_score_rms=4.75`, 但 `target_step_rms=0.0427` 明显大于 NOPESS ~0.026，`policy_score_rms=3.63` 也偏强。关键诊断：`compact_no_neighbor_fraction=1.0`, `inside_neighbor_count_mean=0`, `compact_density_mean=0`，说明 BW0.25 在 cube action chunk 高维空间里过小，compact kernel 基本全程退化成 nearest fallback 拉回，而不是球内 KDE。结论：bandit 上有效的 compact BW0.25 不能直接迁移；cube 需要先按高维 support 距离标定 bandwidth，或改成 per-timestep / per-mode compact score，而不是整段 action chunk 一个 0.25 半径。 |
+| 42 | `COMPACT_EPAN_BW125_NOPESS_B02_L02_T075_1M` | `hzvdn5sr` | compact-support KDE 半径过大是否能覆盖高维 action chunk | NOPESS + Epanechnikov `kernel_bandwidth=1.25` | `300k` eval 手动停 | `0.02 @ 200k` | `0.00 @ 250k` | — | 半径变大但 fallback 被 `1/h^2` 稀释，`behavior_score_rms≈0.56`, `support_mse≈0.78`，基本失败 |
+| 43 | `COMPACT_EPAN_BW125_FB025_NOPESS_B02_L02_T075_1M` | `kcuac8yz` | 解耦 compact radius 与 fallback 拉回强度 | NOPESS + `kernel_bandwidth=1.25`, `compact_fallback_bandwidth=0.25` | `920k` 手动停 | `0.56 @ 250k` | `0.36 @ 900k` | `0.348` | 修复 BW1.25 拉力过弱，但没有超过 NOPESS；强 pullback 持续存在，`p99_behavior_score_norm=100` |
+| 44 | `COMPACT_EPAN_BW075_FB025_NOPESS_B02_L02_T075_1M` | `kxx5edtq` | compact-support KDE 半径折中：BW0.75 + fallback 0.25 | NOPESS 基础 + `kde_kernel=epanechnikov`, `kernel_bandwidth=0.75`, `compact_fallback_bandwidth=0.25`, `compact_kernel_fallback=nearest`, `compact_kernel_score_clip=100` | `1000k` ✓ | `0.64 @ 200k` | `0.50 @ 1M` | `0.568` | **目前 compact cube 变体里最好，但仍没超过 NOPESS 1M 基线** (`j3i842wt`: peak 0.68, final 0.62)。比 BW0.25 final 0.32 和 BW1.25+FB0.25 latest 0.36 明显好，说明半径折中有效；但 final return `-366`、length `354` 仍弱于 NOPESS。final offline 健康：`support_mse=0.0878`, `q_mean=-113.7`, `q_score_rms=0.90`, `behavior_score_rms=5.20`, `policy_score_rms=1.37`, `target_step_rms=0.033`；但 `compact_no_neighbor_fraction=0.912`, `inside_neighbor_count_mean=0.088`，说明 1M 末期仍主要靠 nearest fallback，compact ball 覆盖率不足。 |
+| 45 | `TWOSTAGE_QTOPK4_G64_BEHAV1M_BW05_L1` | Stage1 `w4addjnh`; Stage2 `lrj4ln9v` | frozen behavior generator + Q-topk support 能否替代 generated-action Q-gradient | Stage1 G64 behavior 1M；Stage2 frozen candidates K64, `q_topk=4`, `q_grad_scale=0` | Stage2 `300k` eval / `320k` offline 手动停 | `0.10 @ 100k/200k/250k` | `0.04 @ 300k` | — | actor 贴近 behavior candidates，但 critic/candidate Q 塌到 reward floor；失败点是 ranking 没抬出可执行高价值样本 |
+| 46 | `TWOSTAGE_HYBRID_QTOPK4_G64_A64_BEHAV1M_BW05_L1_DATA` | Stage1 `w4addjnh`; Stage2 `yxl828md` | dataset action + frozen behavior + current actor candidates 的 hybrid positive set | K64 frozen + K64 actor + dataset action；只拷贝 actor，不继承 Stage1 critic | `15k` offline 停，未到 eval | — | — | — | candidate set 过大，吞吐约 `38 step/s`；无 eval，不作为算法结论 |
+| 47 | `TWOSTAGE_HYBRID_QTOPK4_G32_A32_BEHAV1M_BW05_L1_DATA_REUSEQ` | Stage1 `w4addjnh`; Stage2 `smz77we6` | 降 candidate 数并复用 support Q 后 hybrid 是否变好 | K32 frozen + K32 actor + dataset action；复用 `support_q_for_positive` | `200k` eval / `235k` offline 手动停 | `0.02 @ 100k` | `0.00 @ 200k` | `0.005` | 吞吐改善到 `66-67 step/s`，但 success 基本全灭；hybrid 没抬出可执行高价值样本 |
+| 48 | `DIRECT_SELF_QTOPK4_A32_BW05_L1_DATA` | `ppshpq3o` | dataset action + current actor candidates only 是否可行 | positive set = dataset action + actor candidates K32, stop-gradient, `q_topk=4`, `q_grad_scale=0` | `200k` eval / `220k` offline 暂停 | `0.00` | `0.00 @ 200k` | `0.000` | 几乎完全自锁：`support_mse≈1.6e-14`, `target_step_rms≈1.3e-7`，纯 self-candidate positive drift 无训练信号 |
+| 49 | `DRIFTPOLICY_STAGE1_BEHAV_G32_PERSTEP_R002_005_02_500K` | `xctl32w5` | 原始 drifting_policy affinity goal 作为 Stage1 behavior，G32 | `gen_per_obs=32`, per-timestep affinity, uniform positive, `q_grad_scale=0` | `100k` eval / `150k` offline 手动停 | `0.06 @ 50k/100k` | `0.06 @ 100k` | — | actor 贴 support，但 critic 已塌到 reward floor；没有显著 behavior success，按用户要求切回 G8 |
+| 50 | `DRIFTPOLICY_STAGE1_BEHAV_G8_PERSTEP_R002_005_02_500K` | `2da9nepq` | 原始 drifting_policy affinity goal 作为 Stage1 behavior，G8 | `gen_per_obs=8`, per-timestep affinity, uniform positive, `q_grad_scale=0` | `500k` 完成 | `0.16 @ 450k` | `0.06 @ 500k` | `0.096` | 能贴 support，但 behavior policy 成功率低；`target_step_rms≈0.445` 仍过大，critic reward-floor |
+| 51 | `DRIFTUNET_STAGE1_BEHAV_G8_BS64_H16_PERSTEP_500K` | `9lsjqhqn` | 全尺寸 U-Net behavior-only Stage1 是否改善表达力 | U-Net dims `(256,512,1024)`, G8, horizon 16, per-timestep affinity | `50k` eval / `55k` offline 手动停 | `0.00` | `0.00 @ 50k` | — | 71.8M 参数，约 `22 step/s`，早期无正向迹象且太慢，切小 U-Net |
+| 52 | `DRIFTUNET_SMALL_STAGE1_BEHAV_G8_BS64_H16_D128_256_512_500K` | `2oydcqip` | 小 U-Net behavior-only Stage1 | U-Net dims `(128,256,512)`, G8, horizon 16, per-timestep affinity | `500k` 完成 | `0.04 @ 150k` | `0.02 @ 500k` | `0.012` | 小 U-Net 也能贴 support，但 success 基本没有；U-Net 表达力不是 Stage1 失败主因 |
+| 53 | `DRIFTUNET_ORIG_STAGE1_BEHAV_G2_BS256_H16_A8_500K` | `shlnilyq` | 完整 drifting_policy low-dim recipe + U-Net | actor-only, normalizer, EMA eval, G2, horizon 16, action steps 8 | `342k` 被系统 kill；最后 eval `300k` | `0.16 @ 250k` | `0.04 @ 300k` | `0.088` | 低阶统计改善但生成尾部仍偏离 data manifold；未形成高成功率 behavior policy |
+| 54 | `FQL_FLOW_BEHAV_RAW_STAGE1_BS256_H16_FS10_500K` | `67p59bko` | 只用 FQL flow matching 做 behavior generator | raw action chunk flow matching, `flow_steps=10`, 无 critic/Q/EMA | `500k` 完成 | `0.04 @ 300k` | `0.02 @ 500k` | `0.016` | 很快且 loss 正常下降，但单纯 behavior rollout 几乎无成功率；不比 original drifting/U-Net 更有希望 |
+| 55 | `DRIFTMLP_ORIG_STAGE1_BEHAV_G2_BS256_H16_A8_500K` | `32mxx8qo` | 完整 original recipe 但 backbone 换 MLP | actor-only, normalizer, EMA eval, G2, MLP `(512,512,512,512)` | `500k` 完成 | `0.06 @ 500k` | `0.06 @ 500k` | `0.024` | recipe 对齐但成功率仍很低；MLP 速度快，表达力不是唯一瓶颈 |
+| 56 | `DRIFTMLP_ORIG_STAGE1_BEHAV_G2_BS256_H16_A8_1M_WRONG_ENTITY` | `92qu14rk` | 1M MLP original 首次启动的 W&B entity 问题记录 | 同 row 55 延长到 1M，但未显式设置 `WANDB_ENTITY` | `100k` eval / `100k` offline 因 W&B entity 错误停止 | `0.02 @ 50k` | `0.00 @ 100k` | — | 落到错误 entity；无算法结论，错启动 checkpoint 已删 |
+| 57 | `DRIFTMLP_ORIG_STAGE1_BEHAV_G2_BS256_H16_A8_1M_CPU_FALLBACK` | `oze0g043` | 修 W&B env 时误用 login shell 的环境问题记录 | `bash -lc` 导致 CUDA library path 丢失，JAX CPU fallback | 未到自身 eval 即停 | — | — | — | 环境问题，不作为算法数据；已改非 login shell 重启 |
+| 58 | `DRIFTMLP_ORIG_STAGE1_BEHAV_G2_BS256_H16_A8_1M_GPU` | `2rfnp11g` | MLP original recipe 正确 GPU 版 1M | row 55 配置延长到 `1M`，W&B/env 正确 | `1000k` 完成 | `0.10 @ 550k` | `0.00 @ 1000k` | `0.032` | 1M 仍没有形成 behavior success，最终回到 0；original MLP Stage1 方向基本证伪 |
+| 59 | `DRIFT_AFFINITY_Q_R002_005_02_QGRAD_T005` | `bhc58qvm` | original affinity goal + target-critic action-gradient 的 RL 接法 | `agent=drift_affinity_q`, `best_of_n=8`, `transport_step_size=0.05`, `drift_tau=0.75`, `actor_pessimism_coef=0` | `1000k` 完成 | `0.90 @ 400k` | `0.74 @ 1000k` | `0.716` | 历史最强 positive result，但需标注 dirty-code caveat：W&B commit `0f7455f` 不包含当时 untracked 的 `agents/drift_affinity_q.py`，因此后续 current-code 复刻/消融不能严格视为同代码复现。算法结论仍是 Q-gradient 与 affinity/data-action anchor 结合明显超过 NOPESS final/last5 |
+| 60 | `DRIFT_AFFINITY_Q_SEED_ABLATION_QUEUE_20260510` | `tvii8qco` | affinity-Q 多 seed 队列的早停记录 | 同 row 59，`seed=10002` | `100k` eval / `105k` offline 手动停 | `0.44 @ 100k` | `0.44 @ 100k` | — | 用户取消多 seed，部分数据不作 seed 结论；100k 走势仍有正向迹象 |
+| 61 | `DRIFT_AFFINITY_Q_DIRECT_TO98_QUEUE_20260510` | `87nx2m87`; `d1pabco4`; `m653w1be`; `5puhd405`; `lvh4ak7g`; `60pdnowf`; `jv3h6ii6`; `jkl1d0qc` | affinity-Q 必要性消融 + 6 条冲高 sweep | NOQ、NOAFFINITY、BEST64/128、Q step、affinity scale sweep；后续 `save_interval=0` | ablation + 6 variants 完成 | `0.76 @ 350k` (`BEST64`) | best final `0.50` | best last5 `0.544` | 证明 Q-gradient 和 affinity anchor 都必要；但 best_of_n 加大、降 Q step、调 affinity scale 都没冲到 0.98，且低于 row 59 |
+| 62 | `DRIFT_AFFINITY_Q_CONS01_PESS05_K16_BEST64_600K` | `d9o8cwak` | 试 pessimistic ranking + conservative critic 能否减少 false-high-Q candidate selection | row 59 基础上 `actor_pessimism_coef=0.5`, `conservative_coef=0.1`, `n_conservative_actor_samples=16`, `best_of_n=64`, `save_interval=0` | `600k` 完成；`BEST6` 误启动 run `cmr2w8uj` 在首个 eval 前停止；local `projects/qam/results/4090f/d9o8cwak` | `0.60 @ 350k` | `0.48 @ 600k` | `0.532` | conservative/pessimistic 没有冲高，peak 低于 row 61 的 `BEST64` (`0.76`)，final/last5 接近 (`0.48/0.532` vs `0.50/0.544`)。final offline: `conservative_loss≈1.71`, `q_score_rms≈1.05`, `q_step_rms≈0.0525`, `affinity_step_rms≈0.558`, `target_step_rms≈0.559`, `support_mse≈0.094`, `critic/q_mean≈-169.8`, `q_ensemble_std_mean≈0.541`。结论：这组 conservative loss + `actor_pessimism_coef=0.5` 没解决高峰值问题，可能压低了有用候选或 ranking 仍未校准；后续若继续该方向应扫更小 `conservative_coef` 或只加 eval-time pessimism。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/d9o8cwak` |
+| 63 | `DRIFT_AFFINITY_Q_SINGLEQ_CONS01_K64_AFF05_BEST64_600K` | `mkhyoi3v` | single critic + train/eval candidate 对齐 + 平衡 affinity/Q force | row 59 基础上 `num_qs=1`, `best_of_n=64`, `n_conservative_actor_samples=64`, `conservative_coef=0.1`, `actor_pessimism_coef=0.0`, `affinity_goal_step_scale=0.5`, `transport_step_size=0.05`, `save_interval=0` | `450k` eval / `495k` offline 手动停；首次启动 run `m6iaf9wm` 因 single-critic `_score_action_set` shape bug 在首步失败，无 eval；已修复并重启；local `projects/qam/results/4090f/mkhyoi3v`; queue log `/home/user/wge/qam/logs/queue_20260511-142643` | `0.16 @ 300k/350k` | `0.14 @ 450k` | `0.124` | **阶段性证伪这组 single-Q conservative 对齐配置**。相比 row 59 (`peak 0.90`, final `0.74`) 和 row 61/62，成功率明显偏低；即使用单 critic 让 train conservative samples 与 eval `best_of_n=64` 对齐，并把 `affinity_goal_step_scale` 降到 `0.5`，也没有改善 ranking/force imbalance。final offline: `conservative_loss≈3.40`, `critic_loss≈3.26`, `q_score_rms≈1.33`, `q_step_rms≈0.0667`, `affinity_step_rms≈0.414`, `target_step_rms≈0.417`, `support_mse≈0.162`, `critic/q_mean≈-123.5`, `q_ensemble_std_mean=0`。结论：问题不只是 ensemble pessimism/train-eval sample 数不一致；单 critic + 强 conservative 反而可能把可用候选压掉，且 Q/affinity 合力仍不能产生高成功 mode。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/mkhyoi3v` |
+| 64 | `DRIFT_AFFINITY_Q_10Q_CONS01_K64_AFF05_BEST64_600K` | `lczuqok0` | row 63 恢复 10 个 critic，检验 single-Q 是否是失败主因 | row 63 仅改 `num_qs=10`；保持 `best_of_n=64`, `n_conservative_actor_samples=64`, `conservative_coef=0.1`, `actor_pessimism_coef=0.0`, `affinity_goal_step_scale=0.5`, `transport_step_size=0.05`, `save_interval=0` | `300k` eval / `305k` offline 手动停；local `projects/qam/results/4090f/lczuqok0`; queue log `/home/user/wge/qam/logs/queue_20260511-151058` | `0.50 @ 200k` | `0.40 @ 300k` | — | 10 个 critic 不能单独修复 K64 + conservative + affinity 降半的问题；走势仍明显低于 row 59。final offline: `conservative_loss≈3.55`, `q_score_rms≈1.02`, `q_step_rms≈0.0508`, `affinity_step_rms≈0.416`, `target_step_rms≈0.416`, `support_mse≈0.186`, `critic/q_mean≈-132.5`, `q_ensemble_std_mean≈0.590`。结论：失败主因不是 single critic，而更像 K64 ranking 偏差被放大 + conservative 压掉 actor 改良信号 + affinity anchor 变弱。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/lczuqok0` |
+| 65 | `DRIFT_AFFINITY_Q_R002_005_02_QGRAD_T005_EVAL_TARGET_ACTOR_1M` | `lydpzkz3` | row 59 原样训练，但 eval candidates 从 `target_actor` 采样 | row 59 基础上新增 `eval_actor=target_actor`；保持 `best_of_n=8`, `conservative_coef=0`, `affinity_goal_step_scale=1.0`, `transport_step_size=0.05`, `actor_pessimism_coef=0.0`, `save_interval=0` | `600k` eval / `600k` offline 手动停；local `projects/qam/results/4090f/lydpzkz3`; queue log `/home/user/wge/qam/logs/queue_20260511-164130` | `0.82 @ 400k` | `0.74 @ 600k` | `0.732` | 没有超过 row 59：同样 `400k` peak 低于 row 59 的 `0.90`，`600k` 与 row 59 `0.72 @ 600k` 接近；说明 row 59 后期波动不只是 current actor eval 抖动，换 EMA actor 采样反而略保守。训练 loss 不变，只把 eval/sample action candidates 从 `π_θ` 换成 EMA `π_{\bar θ}`，ranking 仍用当前 critic 的 actor score。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/lydpzkz3` |
+| 66 | `DRIFT_AFFINITY_Q_QSTEP_DECAY_AFTER400K_1M` | `6prybq08` | current-code affinity-Q，400k 后降低 Q step 保 peak | row 59 风格配置：`best_of_n=8`, `conservative_coef=0`, `affinity_goal_step_scale=1.0`; `transport_step_size=0.05` 到 `400k`，之后 `0.025`; `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/6prybq08`; queue log `/home/user/wge/qam/logs/queue_20260511-180456`；前三次启动分别因 `None` 型 flag 默认值、W&B tag 65 字符、JAX tracer `float(q_step_size)` 失败，均未产生 eval | `0.80 @ 350k/600k/950k` | `0.66 @ 1000k` | `0.732` | Q-step schedule 生效：final offline `actor/transport_step_size=0.025`, `q_step_rms≈0.0247`, `affinity_step_rms≈0.478`, `support_mse≈0.0715`, `critic/q_mean≈-179.9`。但它不是 row 59 的严格单变量消融，因为 row 59 依赖当时未追踪的 dirty `drift_affinity_q.py`；在当前代码下，400k 后减半 Q step 只把曲线压在 `0.7~0.8` 附近，没有产生更高 peak。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/6prybq08` |
+| 67 | `DRIFT_AFFQ_EVAL_TARGETCRIT_1M` | `9jw9lue9` | 不改训练，只测 eval ranking 噪声：current actor candidates 用 target critic 排名 | current-code row 59 风格配置，新增 `eval_critic=target_critic`; `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/9jw9lue9`; queue log `/home/user/wge/qam/logs/queue_20260511-205951` | `0.88 @ 350k` | `0.56 @ 1000k` | `0.588` | target critic ranking 能在早期抬出高峰，peak 接近 row 59 的 `0.90`，但后期明显回落；说明 eval current critic ranking 噪声不是唯一瓶颈，训练后半程 actor/critic 分布本身在退化。final offline: `q_step_rms≈0.0500`, `affinity_step_rms≈0.584`, `support_mse≈0.101`, `critic/q_mean≈-167.4`, `q_ensemble_std_mean≈0.487`。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/9jw9lue9` |
+| 68 | `DRIFT_AFFQ_TAU06_QCLIP5_1M` | `w8f993jf` | current-code row 59 风格上温和增强 Q force，并收紧 Q-gradient clip | `drift_tau=0.6`, `q_grad_clip_norm=5.0`; `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/w8f993jf`; queue log `/home/user/wge/qam/logs/queue_20260511-205951` | `0.86 @ 600k` | `0.72 @ 1000k` | `0.764` | 最新三条里最好，也是 current-code affinity-Q 里最稳的一条：final/last5 超过 row 66，但 peak 仍低于历史 row 59 的 `0.90`。final offline: `q_step_rms≈0.0535`, `affinity_step_rms≈0.623`, `support_mse≈0.124`, `critic/q_mean≈-167.0`, `q_ensemble_std_mean≈0.468`；低 tau + clip 没崩，说明稍强 Q force 比 400k 后减 Q step 更有希望。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/w8f993jf` |
+| 69 | `DRIFT_AFFQ_RTEMP_002_005_1M` | `y5k0mwn3` | current-code row 59 风格上让 affinity 更局部，去掉宽温度 `0.2` | `affinity_temperatures=(0.02,0.05)`; `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/y5k0mwn3`; queue log `/home/user/wge/qam/logs/queue_20260511-205951` | `0.48 @ 250k/500k` | `0.26 @ 1000k` | `0.304` | 明确变差：去掉 `0.2` 宽温度后 affinity 过局部，不能形成有效跨邻域/跨 mode 的支持集拉力。final offline: `q_step_rms≈0.0486`, `affinity_step_rms≈0.632`, `support_mse≈0.202`, `critic/q_mean≈-118.6`；critic 数值看起来没塌，但 env success 很低，说明局部 affinity 目标几何不对。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/y5k0mwn3` |
+| 70 | `DRIFT_AFFQ_TAU055_QCLIP5_1M` | `o24jwm1s` | row 68 follow-up：继续增强 Q force，保持相同 Q-gradient clip | row 68 基础上 `drift_tau=0.55`, `q_grad_clip_norm=5.0`; `best_of_n=8`, `transport_step_size=0.05`, `affinity_temperatures=(0.02,0.05,0.2)`, `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/o24jwm1s`; queue log `/home/user/wge/qam/logs/queue_20260512-124936` | `0.80 @ 200k/400k` | `0.54 @ 1000k` | `0.644` | 放大 Q 没有超过 row 68：final offline `q_step_rms≈0.0593`, `q_score_rms≈1.19`, `affinity_step_rms≈0.645`, `support_mse≈0.121`, `p99_total_velocity_norm≈6.20`, `max_total_velocity_norm≈15.7`。Q 已经更强但 success 上限反而低，说明下一步应降低 affinity scale 或控制 target outlier，而不是继续降 `tau`。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/o24jwm1s` |
+| 71 | `DRIFT_AFFQ_TAU06_QCLIP5_AFF08_1M` | `tf47j0cr` | row 68 follow-up：回到 row68 的 Q 强度，但降低 affinity scale | row 68 基础上 `affinity_goal_step_scale=0.8`; 保持 `drift_tau=0.6`, `q_grad_clip_norm=5.0`, `best_of_n=8`, `transport_step_size=0.05`, `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/tf47j0cr`; queue log `/home/user/wge/qam/logs/queue_20260512-150200`; remote run hash `7920c7f3218295009e4ecb955bd6d212ac3ac617118ffa0c0a613a0f5c2600aa` | `0.88 @ 250k` | `0.52 @ 1000k` | `0.544` | 降低 affinity scale 没有稳定住：早期 peak 高于 row 68 的 `0.86`，但 final/last5 明显更差。final offline: `q_step_rms≈0.0608`, `affinity_step_rms≈0.608`, `support_mse≈0.152`, `q_score_rms≈1.215`, `p99_total_velocity_norm≈5.80`, `max_total_velocity_norm≈12.0`, `critic/q_mean≈-146.5`, `q_ensemble_std_mean≈0.514`。结论：单纯减 affinity 会提高相对 Q steering，但支持集约束变弱，后期更容易漂。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/tf47j0cr` |
+| 72 | `DRIFT_AFFQ_TAU06_QCLIP5_TOTALCLIP3_1M` | `6pickuau` | row 68 follow-up：控制 total target outlier | row 68 基础上新增 `total_goal_clip_norm=3.0`; 保持 `affinity_goal_step_scale=1.0`, `drift_tau=0.6`, `q_grad_clip_norm=5.0`, `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/6pickuau`; queue log `/home/user/wge/qam/logs/queue_20260512-210434/job_001.log`; remote run hash `4923ff19bbcd6c1b70913dca6ee9e97c436c9b747e2eba320122b3f01a4a3da1` | `0.76 @ 300k` | `0.70 @ 1000k` | `0.588` | total target clip 按预期生效：final `p99_total_velocity_norm=3.0`, `max_total_velocity_norm≈3.0`, 但没有提高 success 上限；peak 低于 row68/73，last5 也低。final offline: `q_step_rms≈0.0560`, `affinity_step_rms≈0.650`, `target_step_rms≈0.441`, `support_mse≈0.124`, `critic/q_mean≈-151.5`, `q_ensemble_std_mean≈0.489`。结论：outlier 裁剪能控制目标位移，但把有效大步也一起截掉了，不是冲高方向。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/6pickuau` |
+| 73 | `DRIFT_AFFQ_TAU06_QCLIP5_TGTMAX_1M` | `djnbyr63` | row 68 follow-up：critic target 从 next-candidate mean 改成 max | row 68 基础上新增 `target_action_agg=max`; 保持 `drift_tau=0.6`, `q_grad_clip_norm=5.0`, `affinity_goal_step_scale=1.0`, `best_of_n=8`, `target_actor_num_samples=8`, `save_interval=0` | `1000k` 完成；local `projects/qam/results/4090f/djnbyr63`; queue log `/home/user/wge/qam/logs/queue_20260512-150200/job_002.log`; remote run hash `432437ee18523c66791c7c83e4b4d30fd1726ed1fe59586211cdc48af8e61ecb` | `0.82 @ 50k/400k/500k` | `0.76 @ 1000k` | `0.672` | target mean 改 max 没抬高峰值，peak 低于 row68 的 `0.86`、row59 的 `0.90`，但 final `0.76` 与 row68/row59 同级。final offline: `q_step_rms≈0.0551`, `affinity_step_rms≈0.663`, `support_mse≈0.124`, `q_score_rms≈1.10`, `p99_total_velocity_norm≈6.41`, `max_total_velocity_norm≈16.0`, `critic/q_mean≈-119.3`, `q_ensemble_std_mean≈0.489`。说明 max target 没解决上限，且 total target outlier 仍偏大。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/djnbyr63` |
+| 74 | `DRIFT_AFFQ_TAU06_QCLIP5_RTEMP_BROAD04_1M` | `ut4kkyu5` | row 68 follow-up：放大宽温度 affinity 作用 | row 68 基础上 `affinity_temperatures=(0.02,0.05,0.2,0.4)`, `affinity_goal_step_scale=0.75`; 保持 `drift_tau=0.6`, `q_grad_clip_norm=5.0`, `best_of_n=8`, `save_interval=0` | `1000k` 完成；local 待 pull；queue log `/home/user/wge/qam/logs/queue_20260512-210434/job_002.log`; remote run hash `971a5d7e1ab20e45770d2278192159455e3b6a8807bda86def53a592ecc8e50a` | `0.84 @ 700k` | `0.76 @ 1000k` | `0.724` | 宽温度 `0.4` + scale `0.75` 明显优于早期判断：早期 `50k:0.02, 150k:0.36`，中后期恢复到 `700k:0.84, 750k:0.82`，最终 `0.76`。last5 因 `800k=0.58` 回落被拉低，但 `850k/950k/1M=0.78/0.78/0.76` 仍健康。final offline: `q_step_rms≈0.0526`, `q_score_rms≈1.052`, `affinity_step_rms≈0.473`, `support_mse≈0.071`, `target_step_rms≈0.474`, `p99_total_velocity_norm≈4.23`, `max_total_velocity_norm≈9.48`, `critic/q_mean≈-183.1`, `q_ensemble_std_mean≈0.414`。结论：宽温度没有压垮 critic，反而比 row68 更稳地维持高 final；可继续和 `target_action_agg=max` 等 critic-target 改动组合。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/ut4kkyu5` |
+| 75 | `DRIFT_AFFQ_TAU06_QCLIP5_TGTMAX_RTEMP_BROAD04_1M` | `mc989w4j` | row 73 target max + row 74 宽温度 affinity 的组合 | 实际远程命令：`target_action_agg=max`, `target_actor_num_samples=8`, `affinity_temperatures=(0.02,0.05,0.2,0.4)`, `affinity_goal_step_scale=0.75`; 保持 `drift_tau=0.6`, `q_grad_clip_norm=5.0`, `best_of_n=8`, `actor_pessimism_coef=0`, `save_interval=0` | `1000k` 完成；queue log `/home/user/wge/qam/logs/queue_row75_tgtmax_broad_20260513-012618/job_001.log`; remote run hash `59525b54298b042f900dd28539147c70eeaa7d070db4a61eb0afe92c64568e36` | `0.88 @ 50k/200k/750k` | `0.68 @ 1000k` | `0.740` | 组合接近但未突破 `0.90`：完整曲线末段 `750k:0.88, 800k:0.70, 850k:0.76, 900k:0.74, 950k:0.82, 1000k:0.68`。final summary: `q_step_rms≈0.0587`, `support_mse≈0.0982`, `max_total_velocity_norm≈10.20`, `q_ensemble_std_mean≈0.549`。结论：`target max + broad04` 比 row74/73 的单因素组合有早期冲高，但仍卡在 `0.88`，需要 high-peak 后续。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/mc989w4j` |
+| 76 | `AFFQ_R75_BON16_1M` | `xcu4mcey` | row75 high-peak：只提高 eval/deployment candidate search | row75 follow-up 基础上 `best_of_n=16`; 其他保持 row75 high-peak control；`eval_interval=10000` | `1000k` 完成；W&B direct pull | `0.92 @ 230k/460k/470k/590k/700k/710k/760k/770k` | `0.84 @ 1000k` | `0.768` | 验证 candidate search budget 有效，已经多次跨过 `0.90`。final summary: `q_step_rms≈0.0555`, `q_score_rms≈1.11`, `affinity_step_rms≈0.506`, `support_mse≈0.0941`, `p99_total_velocity_norm≈4.60`, `max_total_velocity_norm≈12.53`, `q_ensemble_std_mean≈0.532`。但后期 last5 不高，说明只是更会选，不是稳定把分布整体推到 0.9+。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/xcu4mcey` |
+| 77 | `AFFQ_R75_TN16_1M` | `ym964fdj` | row75 high-peak：增加 max bootstrap next-action 候选 | row75 follow-up 基础上 `target_actor_num_samples=16`; `target_action_agg=max`; `eval_interval=10000` | `1000k` 完成；W&B direct pull | `0.90 @ 220k/730k` | `0.78 @ 1000k` | `0.784` | 只刚好碰到 `0.90`，弱于 BON16 和 G16。final summary: `q_step_rms≈0.0499`, `q_score_rms≈0.998`, `affinity_step_rms≈0.525`, `support_mse≈0.0883`, `max_total_velocity_norm≈12.83`, `q_ensemble_std_mean≈0.474`。结论：bootstrap 候选数不是主要瓶颈，至少不如 eval/training particle coverage 直接。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/ym964fdj` |
+| 78 | `AFFQ_R75_G16_1M` | `ehkh3xmd` | row75 high-peak：增加 actor 训练粒子覆盖 | row75 follow-up 基础上 `gen_per_obs=16`; `best_of_n=8`; `eval_interval=10000` | `365k` crashed；W&B direct pull 有 36 个 eval 点 | `0.96 @ 60k/100k/180k/240k/260k` | `0.94 @ 360k` | `0.896` | **当前最强信号**：训练粒子覆盖一加倍，早期和中期多次 `0.94~0.96`，且 `support_mse≈0.0455` 反而低于 row75/BON16，说明不是靠 OOD 硬冲。365k summary: `q_step_rms≈0.0574`, `q_score_rms≈1.148`, `affinity_step_rms≈0.443`, `target_step_rms≈0.444`, `p99_total_velocity_norm≈3.98`, `max_total_velocity_norm≈13.74`, `q_ensemble_std_mean≈0.641`。结论：`gen_per_obs` 是当前冲高关键方向；优先查 crash 原因并重跑/续跑到 1M。W&B: `https://wandb.ai/xxxyyymmm/qam-reproduce/runs/ehkh3xmd` |
 
-理论依据：
-实验 2 说明 critic 的局部 action-gradient 不能被粗暴放大；实验 3 说明 `drift_beta=0.2`、`drift_lambda_pi=0.2`、`drift_tau=0.75` 这组训练配比更稳。实验 4 因此不再加强 actor 更新中的 action-gradient，而是在评估/采样时把 `best_of_n` 从默认 8 提高到 32，让 actor 生成更多候选动作，再由 critic value ranking 选动作。
+---
 
-这条实验检验的是：critic 的局部梯度可能不可靠，但 critic 的相对排序是否仍有用。如果 `TOP3_BEST32` 的 success 明显高于实验 3，说明 value ranking 能从更多 actor samples 中挑出更好的动作；如果提升不明显，说明瓶颈更可能在 actor 候选分布本身，而不是候选数量。
+## 代码改动累计（已实验）
+
+以下为本轮已实际跑过或产生明确中断结论的实验性实现。对应代码已从 `agents/drift.py`、`utils/offline_advantage_drift_loss.py`、`utils/datasets.py`、`main.py` 中删除，避免后续误用；这里只保留实验账本。
+
+| 改动 | 代表实验 | 结论 |
+| --- | --- | --- |
+| `use_iql_target`：critic target 从 target actor samples 改成 `V(s')` | `IQL_TGT_ONLY_B02_L02_T075` | 已证伪。V 学不到有效上分位，critic 随 V 塌到 reward floor |
+| `use_awr_weight`：actor loss 乘 AWR 权重 | `IQL_FULL_B02_L02_T075_K09_T03` | 已证伪。AWR 权重撞上限，actor 依极少数样本学习并崩 |
+| `use_qam_style_target`：QAM 风格两阶段 target，mean 选动作再 pessimistic 估值 | `NOPESS_QAMTGT_B02_L02_T075` | 已证伪。不如 NOPESS，两阶段选-估在 DRIFT 架构下没收益 |
+| `use_direct_q_loss`：actor 直接优化 `-Q(gen)`，可加 nearest-support BC | `DIRECTQ_NOPESS_B02_L02_T075`, `DIRECTQ_BC10_B02_L02_T075` | 已证伪。无 BC 直接 OOD；强 BC 能贴 support 但 critic 仍塌 |
+| `use_3force_direct_loss`：把三力改写成直接 gradient-flowing loss | `NOPESS_3FORCE_DIRECT_B02_L02` | 已证伪。和 DIRECTQ 同类，actor/critic 同步墙仍在 |
+| `use_awr_behavior`：KDE ref weights 用 Q-AWR softmax | `NOPESS_AWRBEH_B02_L02`, `NOPESS_AWRKDE_K64_B02_L02` | 已证伪。软加权会拉向非凸高价值 mode 之间的几何中心 |
+| `use_sinkhorn_behavior`：per-particle Sinkhorn assignment 作为 extra velocity | `NOPESS_SINK_K64_EPS1_W2` | 已证伪。训练稳定但明显慢于 NOPESS，KNN support 动作多样性不足 |
+| `use_langevin`：K-step Langevin / 多步 Euler target | `LANGEVIN_*` 系列 | 已证伪。actor amortize 多步/随机终点存在 mismatch，整体不如 NOPESS |
+| `use_rtg_supervision`：critic 额外回归 Monte-Carlo RTG | `RTG_SUP_W05` | 已证伪。RTG 标尺不等于可执行 mode selection，`rtg_loss` 高且 success 全 0 |
+| `use_rtg_kde`：support KDE ref weights 用 `softmax(RTG/temp)` | `RTG_KDE_T50_K64` | 已证伪。训练指标不塌但 env success 近乎全灭，仍是软凸组合问题 |
+| `use_rl_drifting_loss`：原始 drifting_policy affinity loss 接入 RL | `RLDRIFT_QW_K64_ENT1` | 已证伪当前接法。normalized force 无步长缩放，`target_step_rms≈0.9` 过猛 |
+| `behavior_support_k` / KNN support infra | AWRKDE、Sinkhorn、RTG_KDE、RLDRIFT | 作为实验基础设施已验证可用；本轮为清理实验代码已删除 |
+
+---
+
+## W&B 指标
+
+主要看两类键：`eval/*` 和 `offline_agent/*`。
+
+| 类别 | 指标 | 含义 | 解读要点 |
+| --- | --- | --- | --- |
+| `eval` | `eval/success` | 任务成功率 | 主指标 |
+| `eval` | `eval/episode.return` | 回报 | 检查"高 success 但动作拖"：QAM 1.0 时 return~-40, NOPESS 0.62 时 return~-296 |
+| `eval` | `eval/episode.length` | episode 长度 | 反推 L_succ：`len = p_succ·L_succ + (1-p_succ)·500` |
+| `offline_agent/actor` | `q_score_rms` | critic action-gradient 强度 | 0.85~1.0 为正常范围 |
+| `offline_agent/actor` | `behavior_score_rms` | behavior 项强度 | NOPESS 下 ~4.7；乘 β=0.2 得 0.94 ≈ q_score |
+| `offline_agent/actor` | `policy_score_rms` | repulsion 强度 | NOPESS 下 ~1.37；λ=0.2 × 1.37 = 0.27 |
+| `offline_agent/actor` | `target_step_rms` | actor 单步更新尺度 | NOPESS ~0.026；> 0.05 开始不稳 |
+| `offline_agent/actor` | `support_mse` | gen 距 support 距离 | 0.05~0.15 正常；>0.5 actor 跑 OOD |
+| `offline_agent/actor` | `gen_q_mean`、`data_q_mean`、`data_advantage_mean` | **注意：`data_advantage = data_q - gen_q`，负值表示 actor 候选 Q 更高** | NOPESS 下 -5（actor 候选已超数据 5 分） |
+| `offline_agent/actor` | `direct_q_term`、`direct_bc_term`、`direct_repulse_term`、`direct_q_scale` | 仅在 `use_direct_q_loss` 或 `use_3force_direct_loss` 时输出 | — |
+| `offline_agent/actor` | `awr_weight_mean`、`awr_weight_max`、`awr_adv_mean` | 仅在 `use_awr_weight=True` 时输出 | weight_max 撞 100 表明分布极右偏 |
+| `offline_agent/actor` | `awr_behavior_weight_max`、`awr_behavior_weight_min` | 仅在 `use_awr_behavior=True` 时输出 | max 接近 1/K 说明 Q 无区分度（AWR 退化） |
+| `offline_agent/critic` | `q_mean` | critic 平均 Q | **塌到 -195 附近 = reward floor，critic 崩盘信号** |
+| `offline_agent/critic` | `q_ensemble_std_mean` | ensemble 分歧 | NOPESS ~0.42 健康；塌时会变小（所有 member 都塌到 floor） |
+| `offline_agent/critic` | `target_q_mean`、`target_next_q_mean` | target 值 | 偏差大说明 bootstrap 有问题 |
+| `offline_agent/critic` | `support_q_mean`、`support_ref_q_mean` | support 动作价值 | 仅在 `conservative_coef>0` 时有值 |
+| `offline_agent/value` | `value_loss`、`v_mean`、`q_minus_v_mean` | 仅在 `use_iql_target=True` 时输出 | `q_minus_v_mean ≈ 0` 说明 V 塌成 Q（expectile 失效） |
